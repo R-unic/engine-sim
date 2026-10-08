@@ -1,0 +1,3 @@
+/target*
+/crates/engine-core/reference/*.ogg
+/tools/sound/oggdec/target

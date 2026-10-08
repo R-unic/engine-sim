@@ -1,0 +1,9 @@
+[package]
+name = "viewer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+engine-core = { path = "../engine-core" }
+bevy = "0.19.1"
+bevy_egui = "0.42"
