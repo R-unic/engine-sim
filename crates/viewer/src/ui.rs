@@ -16,7 +16,7 @@ use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke, Vec2};
 use engine_core::{
-    stock_turbo_count, AirFilter, Cat, CelState, Crossover, EngineConfig, EvapMonitorStatus, Header, IgnitionType, Intercooler,
+    stock_turbo_count, AirFilter, BlowOff, Cat, CelState, Crossover, EngineConfig, EvapMonitorStatus, Header, IgnitionType, Intercooler,
     Muffler, PipeMaterial, Runners, Tuning, BOOST_MAX_BAR, BOOST_MIN_BAR,
 };
 use std::f32::consts::PI;
@@ -1025,6 +1025,7 @@ fn preset(kind: Preset, cfg: &EngineConfig) -> Tuning {
             t.turbo_count = Some(stock_n.max(2).min(max_n));
             t.boost_bar = Some((stock_boost + 0.5).min(1.7));
             t.intercooler = Intercooler::Large;
+            t.blow_off = BlowOff::Vented;
         }
     }
     t
@@ -1149,6 +1150,7 @@ fn tuning_window(ctx: &egui::Context, st: &mut UiState, sim: &mut Sim, jobs: &Dy
                 t.boost_bar = Some(boost as f64);
             }
             discrete |= pick(ui, "Intercooler", "t_intercooler", &mut t.intercooler, &Intercooler::ALL, |v| v.label());
+            discrete |= pick(ui, "Blow-off valve", "t_bov", &mut t.blow_off, &BlowOff::ALL, |v| v.label());
         }
 
         // live readouts

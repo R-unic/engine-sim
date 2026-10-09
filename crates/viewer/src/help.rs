@@ -62,6 +62,7 @@ pub fn tip(key: &str) -> &'static str {
         "t_turbos" => "Number of turbochargers. More small turbos spool quickly; one large one flows more at the top end.",
         "t_turbo_size" => "Turbo size: a small turbo spools fast (quick) but chokes at high rpm; a large one is laggy but flows far more.",
         "t_boost" => "The wastegate setting: the most boost the turbo is allowed to make. More boost means more power and more risk of knock and heat.",
+        "t_bov" => "What the charge pressure does when you lift off the throttle. A diverter valve (stock) recirculates it with a short, soft hiss; a vented blow-off valve dumps it to the air with the loud 'pssh'; with no valve the compressor surges against the closed throttle and flutters. Sound only.",
         "t_intercooler" => "A radiator for the compressed intake air. Cooler air is denser (more power) and less prone to knock.",
         "t_presets" => "Ready-made bolt-on sets. Try one, then watch the DYNO chart, the sound and the 3D rig change.",
         "t_quality" => "How finely the exhaust sound solver divides the pipes (ultra 20 mm cells ... eco 70 mm). Finer cells keep more of the top end and use more CPU; Auto times the engine on your computer when it is chosen, picks the finest tier with room to spare, and then stays on it (a change of tier is a change in the sound) unless the computer falls behind.",

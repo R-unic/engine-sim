@@ -453,3 +453,74 @@ fn engines_with_a_high_firing_frequency_still_have_a_low_end() {
         }
     }
 }
+
+/// 99.9th percentile over the median of the 2 ms envelope of the second difference of `x` (a crude high-pass: what the
+/// ear takes for crackle).
+fn crackle_db(x: &[f32]) -> f64 {
+    let hp: Vec<f32> = x.windows(3).map(|w| w[2] - 2.0 * w[1] + w[0]).collect();
+    let mut env: Vec<f64> = hp.chunks(88).map(|c| (c.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / c.len() as f64).sqrt()).collect();
+    env.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let q = |p: f64| env[((env.len() - 1) as f64 * p) as usize];
+    20.0 * (q(0.995) / q(0.5).max(1e-12)).log10()
+}
+
+fn overrun(cfg: &EngineConfig, tuning: &Tuning, secs: f32) -> Vec<f32> {
+    let wot = input(cfg, tuning, 5500.0, 1.0);
+    let off = input(cfg, tuning, 2500.0, 0.0);
+    let mut snd = EngineSound::new(cfg, tuning, &default_banks(cfg), Quality::FAST);
+    snd.preheat(wot.egt_k * 0.9);
+    snd.set_input(&wot);
+    snd.soak(1.0, 60.0);
+    let mut out = Vec::new();
+    for b in 0..(secs * 60.0) as usize {
+        let t = b as f32 / 60.0;
+        let mut cur = if t < 0.5 { wot.clone() } else { off.clone() };
+        cur.burble = 1.0;
+        if t >= 0.5 {
+            cur.rpm = 5500.0 - 3000.0 * (1.0 - (-(t - 0.5) * 1.1).exp());
+        }
+        cur.serial = b as u64 + 2;
+        snd.set_input(&cur);
+        for _ in 0..735 {
+            out.push(snd.next_sample());
+        }
+    }
+    out
+}
+
+#[test]
+fn burble_cracks_stand_out_on_an_open_exhaust_and_stay_soft_through_a_stock_one() {
+    // Rally cars on the overrun (reference/batch2): the 1.5-8 kHz envelope has its 99.9th percentile 25-37 dB over its median; the
+    // noise of a steady engine has 8-10. Through a stock cat and can the crack is absorbed and only the thump is left.
+    let cfg = engine_by_id("v8").unwrap();
+    let stock = overrun(&cfg, &Tuning::default(), 4.0);
+    let open = overrun(&cfg, &Tuning::parse_spec("cat=delete,muffler=delete").unwrap(), 4.0);
+    let (s, o) = (crackle_db(&stock[44_100..]), crackle_db(&open[44_100..]));
+    println!("crackle (99.5th percentile over median of the high-passed envelope): stock {s:.1} dB, open {o:.1} dB");
+    assert!(stock.iter().chain(open.iter()).all(|v| v.is_finite() && v.abs() <= 1.0));
+    assert!(o > s + 3.0, "an open exhaust must crackle more than a stock one: {o:.1} vs {s:.1}");
+    assert!(o > 12.0, "no distinct cracks on an open exhaust: {o:.1} dB");
+}
+
+#[test]
+fn a_running_engine_has_a_bounded_crank_speed_ripple() {
+    // the within-cycle ripple and the slow wander of the combustion torque: there, and nowhere near the cranking surge
+    for id in ["i4", "v8", "w16", "dieseli6"] {
+        let cfg = engine_by_id(id).unwrap();
+        let inp = input(&cfg, &Tuning::default(), (cfg.redline_rpm * 0.13).max(750.0), 0.0);
+        let mut snd = EngineSound::new(&cfg, &Tuning::default(), &default_banks(&cfg), Quality::FAST);
+        snd.preheat(inp.egt_k * 0.9);
+        snd.set_input(&inp);
+        snd.soak(1.0, 60.0);
+        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+        for _ in 0..(3.0 * 44_100.0) as usize {
+            snd.next_sample();
+            let d = snd.crank_speed_deviation();
+            lo = lo.min(d);
+            hi = hi.max(d);
+        }
+        println!("{id}: idle crank speed {:+.2} %..{:+.2} %", lo * 100.0, hi * 100.0);
+        assert!(hi - lo > 0.003, "{id}: a dead-steady crank ({:.4})", hi - lo);
+        assert!(hi - lo < 0.15 && hi < 0.12 && lo > -0.12, "{id}: ripple out of bounds {lo}..{hi}");
+    }
+}

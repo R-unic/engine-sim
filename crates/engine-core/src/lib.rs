@@ -22,7 +22,7 @@ pub use cylinder::{CylinderSample, CylinderTelemetry, StrokePhase};
 pub use ecu::{CelState, EvapMonitorStatus};
 pub use engine::{CombustionEngine, EngineEvents, EngineTelemetry};
 pub use tuning::{
-    stock_turbo_count, AirFilter, Cat, Crossover, Header, Intercooler, Muffler, Runners, Tuning, TurboSetup, BOOST_MAX_BAR, BOOST_MIN_BAR,
+    stock_turbo_count, AirFilter, BlowOff, Cat, Crossover, Header, Intercooler, Muffler, Runners, Tuning, TurboSetup, BOOST_MAX_BAR, BOOST_MIN_BAR,
 };
 
 /// Convenience: a ready-to-run engine with the default 6-speed, standard brakes and a fuel

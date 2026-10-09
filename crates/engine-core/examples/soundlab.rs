@@ -150,9 +150,10 @@ fn main() {
             println!("operating point: {rpm:.0} rpm, throttle {thr:.2}: MAP {:.0} kPa, AFR {:.1}, EGT {:.0} K, load {:.2}", inp.map_pa / 1e3, inp.afr, inp.egt_k, inp.load);
             snd.preheat(inp.egt_k * 0.9);
             snd.set_input(&inp);
-            println!("rattle level {:.2} (petrol idle = 0.72)", snd.rattle_level());
+            println!("rattle level {:.2} (petrol idle = 0.72), input spool {:.2} boost {:.2}", snd.rattle_level(), inp.spool, inp.boost);
 
             snd.soak(num(&m, "soak", 2.0), 60.0);
+            println!("turbo shaft {:.2}", snd.turbo_shaft());
             let warm = (num(&m, "warm", 1.0) * fs as f32) as usize;
             let mut sink = vec![0.0f32; warm];
             snd.render(&mut sink);
@@ -588,6 +589,7 @@ fn main() {
             let (from, to, secs) = (num(&m, "from", 5500.0), num(&m, "to", 2200.0), num(&m, "secs", 5.0));
             let wot = operating_point(&cfg, &tuning, from as f64, 1.0);
             let off = operating_point(&cfg, &tuning, to as f64, 0.0);
+            println!("wide open: spool {:.2}, boost {:.2} bar, MAP {:.0} kPa", wot.spool, wot.boost, wot.map_pa / 1e3);
             snd.preheat(wot.egt_k * 0.9);
             snd.set_input(&wot);
             snd.soak(2.0, 60.0);
@@ -595,6 +597,7 @@ fn main() {
             let mut full = Vec::with_capacity(n);
             let mut serial = 2u64;
             let block = 735;
+            let (mut jet_peak, mut jet_big) = (0.0f32, 0usize);
             let mut burble = wot.clone();
             burble.burble = num(&m, "burble", 1.0);
             for b in 0..(n / block) {
@@ -603,14 +606,26 @@ fn main() {
                 cur.burble = burble.burble;
                 if t >= 1.0 {
                     cur.rpm = from + (to - from) * (1.0 - (-(t - 1.0) * 1.1).exp()) / (1.0 - (-(secs - 1.0) * 1.1).exp());
+                    // the turbo's spool and the charge pressure fall away over a few tenths of a second, as the engine model has them
+                    let k = (-(t - 1.0) / 0.35).exp();
+                    cur.spool = off.spool + (wot.spool - off.spool) * k;
+                    cur.boost = off.boost + (wot.boost - off.boost) * k;
+                    cur.turbo_speed = cur.spool;
                 }
                 cur.serial = serial;
                 serial += 1;
                 snd.set_input(&cur);
                 for _ in 0..block {
                     full.push(snd.next_sample());
+                    if t >= 1.0 {
+                        jet_peak = jet_peak.max(snd.p_jet.abs());
+                        if snd.p_jet.abs() > 0.5 {
+                            jet_big += 1;
+                        }
+                    }
                 }
             }
+            println!("jet layer peak {jet_peak:.2} Pa, {jet_big} samples above 0.5 Pa");
             println!("pops fired during the overrun: {} ({:.1} per second)", snd.gas.pops_fired, snd.gas.pops_fired as f32 / (secs - 1.0));
             let base = format!("{out_dir}/lift_{id}");
             write_wav(&format!("{base}.wav"), &full, SAMPLE_RATE).unwrap();

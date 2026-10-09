@@ -49,6 +49,31 @@ impl AirFilter {
     }
 }
 
+/// What happens to the charge pressure when the throttle closes on a turbo engine. Only the sound differs (the dyno does not
+/// move): a diverter valve recirculates it quietly, a vent valve dumps it to the air with a loud hiss, and with nothing the
+/// compressor surges against the closed throttle: the flutter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BlowOff {
+    /// Recirculating diverter valve, as on production cars: a short, soft hiss.
+    #[default]
+    Recirculating,
+    /// Atmospheric blow-off valve: the loud "pssh".
+    Vented,
+    /// No valve: compressor surge, "fut-fut-fut".
+    None,
+}
+
+impl BlowOff {
+    pub const ALL: [BlowOff; 3] = [BlowOff::Recirculating, BlowOff::Vented, BlowOff::None];
+    pub fn label(self) -> &'static str {
+        match self {
+            BlowOff::Recirculating => "Diverter valve (stock)",
+            BlowOff::Vented => "Vented blow-off valve",
+            BlowOff::None => "None (compressor flutter)",
+        }
+    }
+}
+
 /// Intake manifold runner / plenum tuning.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Runners {
@@ -306,6 +331,8 @@ pub struct Tuning {
     /// Wastegate target in bar gauge. `None` = the stock boost.
     pub boost_bar: Option<f64>,
     pub intercooler: Intercooler,
+    /// What the charge pressure does on a throttle lift (sound only).
+    pub blow_off: BlowOff,
     // ---- exhaust acoustics: what the pipes are made of and how long / wide they are
     /// Header material. `None` = what that header style is normally made of.
     pub header_material: Option<PipeMaterial>,
@@ -337,6 +364,7 @@ impl Default for Tuning {
             turbo_size: 1.0,
             boost_bar: None,
             intercooler: Intercooler::Stock,
+            blow_off: BlowOff::Recirculating,
             header_material: None,
             pipe_material: PipeMaterial::MildSteel,
             wall_scale: 1.0,
@@ -534,7 +562,7 @@ impl Tuning {
 impl Tuning {
     /// Parses a comma-separated parts list, e.g.
     /// `turbos=2,size=0.9,boost=1.0,filter=cold|open,runners=long|short|itb,header=shorty|long,cat=highflow|delete,`
-    /// `muffler=sport|straight|delete,pipe=1.2,ic=none|large,pipemat=ti|ss304|ss409|steel|inconel,`
+    /// `muffler=sport|straight|delete,pipe=1.2,ic=none|large,bov=stock|vent|none,pipemat=ti|ss304|ss409|steel|inconel,`
     /// `headermat=ti|ss304|ss409|steel|inconel|iron,wall=1.3,wrap=1,plen=0.8,pdia=1.1,mid=1.3,tail=1.5,cross=none|h|x`.
     pub fn parse_spec(spec: &str) -> Result<Tuning, String> {
         let mut t = Tuning::default();
@@ -571,6 +599,9 @@ impl Tuning {
                 ("muffler", "delete") => t.muffler = Muffler::Delete,
                 ("ic", "none") => t.intercooler = Intercooler::None,
                 ("ic", "large") => t.intercooler = Intercooler::Large,
+                ("bov", "stock") | ("bov", "diverter") => t.blow_off = BlowOff::Recirculating,
+                ("bov", "vent") => t.blow_off = BlowOff::Vented,
+                ("bov", "none") => t.blow_off = BlowOff::None,
                 ("pipemat", m) => t.pipe_material = mat(m)?,
                 ("headermat", m) => t.header_material = Some(mat(m)?),
                 ("wall", _) => t.wall_scale = f.unwrap_or(1.0),

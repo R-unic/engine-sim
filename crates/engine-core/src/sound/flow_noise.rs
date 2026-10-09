@@ -263,6 +263,15 @@ impl FlowLayer {
         }
     }
 
+    /// Delay of the exhaust path from valve to mouth, in audio samples, and what the fitted cat and muffler let through of a
+    /// broadband sound that crosses them (an amplitude ratio).
+    pub fn exhaust_delay_samples(&self) -> usize {
+        self.delay_x
+    }
+    pub fn exhaust_transmission(&self) -> f32 {
+        self.att_x
+    }
+
     /// Takes over the noise generators of `other` (state included), keeping this layer's own shaping filters' gains.
     pub fn copy_noise_from(&mut self, other: &FlowLayer) {
         self.shp_x.copy_state_from(&other.shp_x);

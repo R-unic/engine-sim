@@ -3,6 +3,8 @@
 
 use super::flow_noise::Shaper;
 use super::starter::{Starter, StarterCtx};
+use super::turbo::{Turbo, TurboCtx};
+use crate::tuning::BlowOff;
 
 /// Pressure (rms, Pa, at the listener) of the broadband engine noise at 1000 rpm and full load: calibrated against
 /// recordings of idling and revving cars (`README`, Audio).
@@ -122,6 +124,10 @@ pub struct MechCtx {
     pub diesel: bool,
     /// How hard the combustion hits the block relative to a petrol engine at idle (from the rate of pressure rise).
     pub rattle: f32,
+    /// Engine speed over redline, where the engine is in its firing period (0..1), and the valve on the charge pipe.
+    pub rpm_frac: f32,
+    pub fire_phase: f32,
+    pub blow_off: BlowOff,
     pub lift_off_pop: f32,
 }
 
@@ -140,17 +146,7 @@ pub struct Mechanical {
     comb_lp: f32,
     comb_prev: f32,
     valve_lp: f32,
-    // turbo
-    spool_s: f32,
-    turbo_phase: f32,
-    turbo_phase2: f32,
-    turbo_lp: f32,
-    bov_env: f32,
-    bov_lp: f32,
-    bov_armed: bool,
-    boost_hold: f32,
-    thr_slow: f32,
-    throttle: f32,
+    turbo: Turbo,
     gear_phase: f32,
     gear_shaft: f32,
     knock_env: f32,
@@ -160,9 +156,7 @@ pub struct Mechanical {
     engine_noise: Shaper,
     /// 1 while the engine fires, falling away when it stops.
     fire: f32,
-    // the tonal parts are not perfectly steady: drift and flutter of the whistle and the gear mesh
-    whistle_fm: Wander,
-    whistle_am: Wander,
+    // the gear mesh is not perfectly steady: drift and flutter
     gear_fm: Wander,
     gear_am: Wander,
     rng2: Noise,
@@ -181,16 +175,7 @@ impl Mechanical {
             comb_lp: 0.0,
             comb_prev: 0.0,
             valve_lp: 0.0,
-            spool_s: 0.0,
-            turbo_phase: 0.0,
-            turbo_phase2: 0.0,
-            turbo_lp: 0.0,
-            bov_env: 0.0,
-            bov_lp: 0.0,
-            bov_armed: true,
-            boost_hold: 0.0,
-            thr_slow: 0.0,
-            throttle: 0.0,
+            turbo: Turbo::new(fs),
             gear_phase: 0.0,
             gear_shaft: 0.0,
             knock_env: 0.0,
@@ -202,12 +187,15 @@ impl Mechanical {
                 s.normalise();
                 s
             },
-            whistle_fm: Wander::new(5.0, fs),
-            whistle_am: Wander::new(14.0, fs),
             gear_fm: Wander::new(3.0, fs),
             gear_am: Wander::new(9.0, fs),
             rng2: Noise::new(0x7A31_C5E3),
         }
+    }
+
+    /// Shaft speed of the turbo, 0..1 (analysis).
+    pub fn turbo_shaft(&self) -> f32 {
+        self.turbo.shaft()
     }
 
     /// Takes over the noise generators of `other` (state included), so both produce the same noise from here on.
@@ -216,6 +204,7 @@ impl Mechanical {
         self.rng = other.rng.clone();
         self.rng2 = other.rng2.clone();
         self.fire = other.fire;
+        self.turbo.copy_noise_from(&other.turbo);
     }
 
     /// One sample of mechanical sound, in pascals at the listener.
@@ -291,36 +280,17 @@ impl Mechanical {
         // ---- starter motor, pinion and ring gear
         out += self.starter.step(&StarterCtx { on: c.starter_on, rpm: c.crank_rpm, strain: c.starter_strain });
 
-        // ---- turbo: compressor whistle that rises with shaft speed, flutter on a lift
-        self.spool_s += (c.spool - self.spool_s) * (1.0 - (-dt / 0.12).exp());
-        self.throttle += (c.throttle - self.throttle) * (1.0 - (-dt / 0.08).exp());
-        self.thr_slow += (self.throttle - self.thr_slow) * (1.0 - (-dt / 0.4).exp());
-        if self.spool_s > 0.03 && c.combusting {
-            let sp = self.spool_s;
-            // a compressor wheel's whistle drifts about with the flow (about 1 %) and flutters in level: a perfectly
-            // steady sine reads as a synthesiser
-            let n2 = self.rng2.next();
-            let f1 = (700.0 + 3300.0 * sp.powf(1.2)) * (1.0 + 0.010 * self.whistle_fm.step(n2));
-            let flutter = (1.0 + 0.3 * self.whistle_am.step(self.rng2.next())).max(0.25);
-            self.turbo_phase = (self.turbo_phase + f1 * dt).fract();
-            self.turbo_phase2 = (self.turbo_phase2 + f1 * 0.617 * dt).fract();
-            let tone = (self.turbo_phase * tau).sin() + 0.4 * (self.turbo_phase2 * tau).sin() + 0.2 * (self.turbo_phase * 2.0 * tau).sin();
-            let drive = (0.25 + 0.75 * self.thr_slow.min(1.0)) * (0.3 + 0.7 * c.boost.clamp(0.0, 1.2));
-            out += tone * flutter * 0.016 * sp.powf(1.5) * drive;
-            self.turbo_lp += (n - self.turbo_lp) * (0.04 + 0.08 * sp);
-            out += self.turbo_lp * 0.008 * sp * (0.3 + c.boost.min(1.2));
-        }
-        self.boost_hold = (self.boost_hold * (-dt / 0.6).exp()).max(c.boost);
-        if self.throttle < 0.4 && self.bov_armed && self.thr_slow > 0.55 && self.boost_hold > 0.3 && c.spool > 0.2 && !c.diesel {
-            self.bov_env = self.boost_hold.clamp(0.0, 1.2);
-            self.bov_armed = false;
-        }
-        if self.throttle > 0.25 {
-            self.bov_armed = true;
-        }
-        self.bov_lp += (n - self.bov_lp) * 0.35;
-        out += (n - self.bov_lp) * self.bov_env * 0.2;
-        self.bov_env *= (-dt / 0.2).exp();
+        // ---- turbo: the compressor's whistle and rush, the blow-off valve or the flutter on a lift
+        out += self.turbo.step(&TurboCtx {
+            spool: c.spool,
+            throttle: c.throttle,
+            boost: c.boost,
+            rpm_frac: c.rpm_frac,
+            fire_phase: c.fire_phase,
+            combusting: c.combusting,
+            diesel: c.diesel,
+            blow_off: c.blow_off,
+        });
 
         // ---- gearbox whine
         if c.gear_whine > 0.01 {

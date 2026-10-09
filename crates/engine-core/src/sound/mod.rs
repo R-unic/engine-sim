@@ -14,6 +14,7 @@ pub mod mechanical;
 pub mod radiation;
 pub mod starter;
 pub mod tier_eq;
+pub mod turbo;
 
 use crate::acoustics::{Env, GasPath, MouthSample, PipeMaterial};
 use crate::config::{EngineConfig, IgnitionType};
@@ -40,6 +41,9 @@ const RUN_RIPPLE_LIMIT: f32 = 0.12;
 /// How hard a block rattles at the reference charge (petrol, idle) and how fast it grows with the rate of pressure rise.
 const RATTLE_AT_IDLE: f32 = 0.72;
 const RATTLE_EXPONENT: f32 = 0.7;
+/// Peak pressure (Pa at the listener, before the insertion loss of the cat and the muffler) of the crack of a pop per
+/// (strength - 1)^1.3.
+const CRACK_PA: f32 = 20.0;
 /// Extra output gain at light-off (the engine catching and flaring above idle) and how long it takes to relax, s.
 const ROAR_GAIN: f32 = 1.3;
 const ROAR_TAU_S: f32 = 1.6;
@@ -213,6 +217,16 @@ pub struct EngineSound {
     lift_env: f32,
     prev_backfire: f32,
     pop_arm: Vec<f32>,
+    // the burble comes in bursts (a rich pocket here, a lean one there): a two-state gate, and the cracks of the pops in flight
+    burst_on: bool,
+    burst_left: f32,
+    pops_seen: u64,
+    cracks: [(f32, f32); 12],
+    crack_env: f32,
+    crack_tau: f32,
+    crack_hp: f32,
+    crack_lp: f32,
+    crack_lp2: f32,
     rng: u32,
     /// Pops fired and the loudness of the latest, for the tailpipe visuals.
     pub pops_fired: u64,
@@ -340,6 +354,15 @@ impl EngineSound {
             lift_env: 0.0,
             prev_backfire: 0.0,
             pop_arm: vec![0.0; n],
+            burst_on: false,
+            burst_left: 0.0,
+            pops_seen: 0,
+            cracks: [(f32::MAX, 0.0); 12],
+            crack_env: 0.0,
+            crack_tau: 0.002,
+            crack_hp: 0.0,
+            crack_lp: 0.0,
+            crack_lp2: 0.0,
             rng: 0x2545_F491,
             pops_fired: 0,
             pop_gain: 0.0,
@@ -530,9 +553,14 @@ impl EngineSound {
         (x >> 8) as f32 / 16_777_216.0
     }
 
-    /// Overrun burble and backfire: on a lift-off or a rev-matched downshift, a cylinder now and then
-    /// holds unburnt charge that lights at the exhaust valve. The pop is armed here and fired by the gas
-    /// path at that cylinder's next exhaust-valve opening, so its bang is a real blow-down.
+    /// Overrun burble and backfire: on a lift-off or a rev-matched downshift, a cylinder now and then holds unburnt charge
+    /// that lights at the exhaust valve. The pop is armed here and fired by the gas path at that cylinder's next
+    /// exhaust-valve opening, so its bang is a real blow-down.
+    ///
+    /// Real burble is not a steady patter. The unburnt charge comes in pockets (the mixture in the manifold is never even),
+    /// so the pops arrive in bursts with quiet between; and their strength is anything but even: most are a soft thump,
+    /// a few are a sharp crack that stands 20 dB and more out of the rest (recordings of rally cars on the overrun:
+    /// median +16 dB over the surrounding noise, the loudest +25 to +30, a third of a second between bursts).
     fn arm_pops(&mut self, combusting: bool, dt: f32) {
         let inp = &self.input;
         self.thr_slow += (self.throttle - self.thr_slow) * (1.0 - (-dt / 0.4).exp());
@@ -554,6 +582,17 @@ impl EngineSound {
         let fire_hz = (self.rpm / 60.0 * n as f32 * 0.5).max(1.0);
         let backfire_edge = self.input.backfire > self.prev_backfire + 0.3;
         self.prev_backfire = self.input.backfire;
+        // the bursts: on for a few tenths of a second, then a gap
+        self.burst_left -= dt;
+        if self.burst_left <= 0.0 {
+            self.burst_on = !self.burst_on;
+            let (u, v) = (self.rand(), self.rand());
+            self.burst_left = if self.burst_on { 0.06 + 0.5 * u * v } else { 0.08 + 0.5 * u * u.sqrt() };
+        }
+        // pops per second on average (the bursts concentrate them); each cylinder's chance per cycle follows from it
+        let rate = 40.0 * gate;
+        let p_avg = rate / fire_hz;
+        let p = if self.burst_on { (p_avg * 1.9).min(0.85) } else { p_avg * 0.1 };
         for i in 0..n {
             let local = self.gas.local(i);
             let prev = self.pop_arm[i];
@@ -568,12 +607,14 @@ impl EngineSound {
                 self.pop_gain = 1.3;
                 continue;
             }
-            // the pops/s stays near 20 at any rpm: each cylinder's chance scales with 1 / firing rate
-            let p = (20.0 * gate / fire_hz).min(0.6);
             if p > 0.0 && self.rand() < p {
-                let g = self.rand();
-                self.gas.pop[i] = Some((1.8 + 3.2 * g * g, 1500.0 + 600.0 * g));
-                self.pop_gain = ((0.35 + 0.9 * g * g) * gate.sqrt() * 0.9).clamp(0.2, 1.3);
+                // log-normal strength: the soft ones are common, a few are many times the median
+                let z = self.rand_gauss();
+                let s = (0.62 * z).exp();
+                let mult = (1.35 + 1.45 * s * s).min(9.0);
+                let t = (1450.0 + 90.0 * mult).min(2150.0);
+                self.gas.pop[i] = Some((mult, t));
+                self.pop_gain = ((mult - 1.35) / 6.0).clamp(0.2, 1.3);
             }
         }
         // report to the viewer
@@ -750,6 +791,7 @@ impl EngineSound {
         let p_tail_eq = self.tail_eq.step(p_tail);
         p_tail = self.tail_lp.step(if self.tier_correction { p_tail_eq } else { p_tail }) * act;
         let (flow_x, flow_i) = self.flow.step(r, self.listener_r * 1.2, self.gas.map_target / (0.97 * MODEL_P_AMB), self.rpm);
+        let crack = self.crack_step(dt, n) * act;
         p_jet = (p_jet + flow_x) * act;
         // induction noise from the intake mouths; a turbo's compressor and charge piping muffle it
         let turbo_mute = 1.0 - 0.85 * in_spool.clamp(0.0, 1.0);
@@ -794,6 +836,9 @@ impl EngineSound {
             valve_events,
             diesel: self.cfg.ignition_type == IgnitionType::Compression,
             rattle: self.rattle,
+            rpm_frac: self.rpm / self.cfg.redline_rpm as f32,
+            fire_phase: (self.gas.crank * n as f32 / 720.0).fract(),
+            blow_off: self.tuning.blow_off,
             lift_off_pop: 0.0,
         });
         p += p_mech;
@@ -820,12 +865,65 @@ impl EngineSound {
         let rel = if env > self.limiter { 0.02 } else { 0.0003 };
         self.limiter += (env - self.limiter) * rel;
         let g = if self.limiter > 0.5 { 0.5 / self.limiter } else { 1.0 };
-        (hp * g * 1.4).tanh() * 0.8 * self.master
+        // a pop's crack does not go through the loudness compressor and the limiter: it is a transient and has to stay one
+        let bang = crack / self.full_scale_pa;
+        ((hp * g + bang) * 1.4).tanh() * 0.8 * self.master
+    }
+
+    /// Turbo shaft speed, 0..1 (analysis).
+    pub fn turbo_shaft(&self) -> f32 {
+        self.mech.turbo_shaft()
     }
 
     /// How hard the combustion hits the block now, relative to a petrol engine at idle (analysis).
     pub fn rattle_level(&self) -> f32 {
         self.rattle
+    }
+
+    /// The sharp top of the pops. The pipe solver radiates up to 2.8 kHz; a combustion bang is a shock that steepens in the
+    /// pipe and leaves it as a crack with energy to 8 kHz and more, a few milliseconds long, delayed by the path to the mouth
+    /// and reduced by what is fitted: through a stock cat and can almost none of it gets out (the thump does), with the
+    /// cat and the muffler gone it is the sharp crackle of a deleted car.
+    fn crack_step(&mut self, dt: f32, n_cyl: usize) -> f32 {
+        let _ = n_cyl;
+        if self.gas.pops_fired != self.pops_seen {
+            let new = self.gas.pops_fired.saturating_sub(self.pops_seen).min(4);
+            self.pops_seen = self.gas.pops_fired;
+            let mult = self.gas.last_pop_mult;
+            for _ in 0..new {
+                if let Some(slot) = self.cracks.iter_mut().find(|c| c.0 == f32::MAX) {
+                    // louder ones are longer and carry more: the amplitude grows faster than the energy of the pop
+                    *slot = (self.flow.exhaust_delay_samples() as f32, CRACK_PA * (mult - 1.0).max(0.0).powf(1.3) * self.flow.exhaust_transmission());
+                }
+            }
+        }
+        let mut fired = 0.0f32;
+        for c in self.cracks.iter_mut() {
+            if c.0 != f32::MAX {
+                c.0 -= 1.0;
+                if c.0 <= 0.0 {
+                    fired = fired.max(c.1);
+                    *c = (f32::MAX, 0.0);
+                }
+            }
+        }
+        if fired > 0.0 {
+            // a new bang: the envelope jumps (never above the loudest in flight), its length grows with its strength
+            self.crack_env = self.crack_env.max(fired);
+            self.crack_tau = 0.0012 + 0.0028 * (fired / (CRACK_PA * 6.0)).clamp(0.0, 1.0);
+        }
+        self.crack_env *= (-dt / self.crack_tau).exp();
+        if self.crack_env < 1.0e-6 {
+            self.crack_env = 0.0;
+            return 0.0;
+        }
+        let w = self.rand_gauss() * 0.7;
+        let tau = std::f32::consts::TAU;
+        self.crack_hp += (w - self.crack_hp) * (1.0 - (-tau * 1100.0 * dt).exp());
+        let x = w - self.crack_hp;
+        self.crack_lp += (x - self.crack_lp) * (1.0 - (-tau * 9000.0 * dt).exp());
+        self.crack_lp2 += (self.crack_lp - self.crack_lp2) * (1.0 - (-tau * 9000.0 * dt).exp());
+        self.crack_lp2 * self.crack_env
     }
 
     /// Fractional deviation of the crank's instantaneous speed from the mean while cranking (analysis).

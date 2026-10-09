@@ -1,3 +1,5 @@
 /target*
 /crates/engine-core/reference/*.ogg
 /tools/sound/oggdec/target
+/crates/engine-core/reference/batch2/*.ogg
+/crates/engine-core/reference/batch2/*.wav
