@@ -321,6 +321,11 @@ impl GasPath {
         (wx, wi)
     }
 
+    /// Cylinder `i`'s slowly drifting offset in burn strength (the personality the cycle-to-cycle scatter rides on).
+    pub fn cylinder_bias(&self, i: usize) -> f32 {
+        self.bias.get(i).copied().unwrap_or(0.0)
+    }
+
     /// Total mass in the cylinders and chambers plus the pipes, kg (for conservation tests).
     pub fn total_mass(&self) -> f32 {
         self.res.iter().map(|r| r.mass).sum::<f32>() + self.exhaust.net.mass()

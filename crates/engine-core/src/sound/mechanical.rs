@@ -120,6 +120,8 @@ pub struct MechCtx {
     pub combustion: f32,
     pub valve_events: f32,
     pub diesel: bool,
+    /// How hard the combustion hits the block relative to a petrol engine at idle (from the rate of pressure rise).
+    pub rattle: f32,
     pub lift_off_pop: f32,
 }
 
@@ -224,7 +226,7 @@ impl Mechanical {
 
         // ---- combustion pressure rise rattles the block (diesel clatter is the same, much sharper)
         let strength = c.combustion * if c.diesel { 7.0 } else { 1.0 };
-        let imp = strength * (0.6 + 0.8 * c.load.clamp(0.0, 1.2));
+        let imp = strength * c.rattle;
         // the pulse is smoothed (a diesel's much less: its pressure rise is nearly instant, but not instant: the
         // first version fed three sharp modes with a step and made a regular 640 Hz buzz at the firing rate)
         let k_comb = 1.0 - (-tau * if c.diesel { DIESEL_RISE_HZ } else { 700.0 } * dt).exp();

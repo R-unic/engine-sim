@@ -7,6 +7,7 @@
 //! materials, the muffler's chambers and the engine's firing order all act on that flow inside the
 //! solver, so changing a part changes the sound for the physical reason.
 
+pub mod combustion;
 pub mod flow_noise;
 pub mod lowend;
 pub mod mechanical;
@@ -30,6 +31,15 @@ const MODEL_P_AMB: f32 = 101_325.0;
 /// compression torque on the crank is larger than the engine model's; this brings the speed ripple while
 /// cranking to what the engine model has (checked against it by the `cranking_speed_ripple` test).
 const CRANKING_TORQUE_SCALE: f32 = 0.35;
+/// A running engine's crank speed deviates from the engine model's rpm by the torque ripple and the cycle-to-cycle scatter of the
+/// combustion: the mean torque is followed over `RUN_MEAN_TAU_S` (slower changes are the engine model's), the idle control and the
+/// load pull the speed back at `RUN_GOVERNOR_RAD_S` (rad/s, a corner near 1.5 Hz), and the deviation is bounded.
+const RUN_MEAN_TAU_S: f32 = 0.15;
+const RUN_GOVERNOR_RAD_S: f32 = 9.0;
+const RUN_RIPPLE_LIMIT: f32 = 0.12;
+/// How hard a block rattles at the reference charge (petrol, idle) and how fast it grows with the rate of pressure rise.
+const RATTLE_AT_IDLE: f32 = 0.72;
+const RATTLE_EXPONENT: f32 = 0.7;
 /// Extra output gain at light-off (the engine catching and flaring above idle) and how long it takes to relax, s.
 const ROAR_GAIN: f32 = 1.3;
 const ROAR_TAU_S: f32 = 1.6;
@@ -219,6 +229,16 @@ pub struct EngineSound {
     starter_t0: f32,
     /// How hard the starter is working against compression, 0..1 (smoothed), for the sound of the motor.
     strain: f32,
+    // the cylinders' pressure through the cycle: the torque ripple of a running engine and the strength of the rattle
+    combustion: combustion::Combustion,
+    charge: combustion::Charge,
+    /// Cycle-to-cycle gain of each cylinder's burn (redrawn as it passes the firing top dead centre) and the angle it was at.
+    cyl_gain: Vec<f32>,
+    cyl_prev: Vec<f32>,
+    /// Peak rate of pressure rise of the reference charge (a petrol engine at idle): what the rattle level was set at.
+    rise_ref: f32,
+    /// Rattle strength of the current charge, relative to the reference (see `Mechanical`).
+    rattle: f32,
     // engine activity: 1 while the crank is driven, falling away once it stops, so a stopped engine is silent
     activity: f32,
     // the pipe solver resolves no more than a few kHz; the monopole radiation is band-limited to match
@@ -270,6 +290,11 @@ impl EngineSound {
         let n = cfg.cylinder_count;
         // the same starter curve the engine model uses: stall torque, falling linearly to its free speed
         let starter_t0 = cfg.starter_torque_nm.max(STARTER_MIN_NM_PER_L * cfg.displacement_l() * cfg.compression_ratio / 10.5) as f32;
+        let rise_ref = {
+            let mut c = combustion::Combustion::new(cfg, gas.valves.exhaust.open);
+            c.set_charge(&combustion::Charge { map_pa: 35_000.0, charge_k: 310.0, air_fuel_ratio: 14.7, ambient_pa: MODEL_P_AMB });
+            c.peak_rise_raw()
+        };
         EngineSound {
             cfg: cfg.clone(),
             tuning: tuning.clone(),
@@ -325,6 +350,16 @@ impl EngineSound {
             starter_t0: starter_t0,
             starter_k: starter_t0 / (STARTER_MAX_RPM as f32 * std::f32::consts::TAU / 60.0),
             strain: 0.0,
+            combustion: {
+                let mut c = combustion::Combustion::new(cfg, gas.valves.exhaust.open);
+                c.set_charge(&combustion::Charge { map_pa: 35_000.0, charge_k: 310.0, air_fuel_ratio: 14.7, ambient_pa: MODEL_P_AMB });
+                c
+            },
+            charge: combustion::Charge { map_pa: 0.0, charge_k: 300.0, air_fuel_ratio: 14.7, ambient_pa: MODEL_P_AMB },
+            cyl_gain: vec![1.0; n],
+            cyl_prev: vec![0.0; n],
+            rise_ref,
+            rattle: RATTLE_AT_IDLE,
             activity: 0.0,
             tail_lp: Lowpass4::new(RADIATION_BAND_HZ, fs),
             intake_lp: Lowpass4::new(RADIATION_BAND_HZ, fs),
@@ -376,6 +411,7 @@ impl EngineSound {
         self.tau_mean = other.tau_mean;
         self.crank_dw = other.crank_dw;
         self.strain = other.strain;
+        self.cyl_gain.clone_from(&other.cyl_gain);
         self.lowend = other.lowend.clone();
         self.gas.crank = other.gas.crank;
         self.gas.copy_state_from(&other.gas);
@@ -448,6 +484,19 @@ impl EngineSound {
             self.gas.fuel_frac[i] = burn / inp.afr.max(5.0);
         }
         self.input = inp.clone();
+        // the pressure the cylinders reach follows the charge they were given
+        let charge = combustion::Charge {
+            map_pa: inp.map_pa.max(15_000.0),
+            charge_k: inp.charge_k.max(250.0),
+            air_fuel_ratio: inp.afr.max(5.0),
+            ambient_pa: if inp.atm_pa > 5.0e4 { inp.atm_pa } else { MODEL_P_AMB },
+        };
+        let moved = |a: f32, b: f32| (a - b).abs() > 0.01 * b.abs().max(1.0);
+        if moved(charge.map_pa, self.charge.map_pa) || moved(charge.air_fuel_ratio, self.charge.air_fuel_ratio) || moved(charge.charge_k, self.charge.charge_k) {
+            self.combustion.set_charge(&charge);
+            self.charge = charge;
+            self.rattle = RATTLE_AT_IDLE * (self.combustion.peak_rise_bar_per_deg() / self.rise_ref).max(0.05).powf(RATTLE_EXPONENT);
+        }
         // combustion scatters most at idle and settles as the load comes on
         self.gas.cyc_cov = 0.02 + 0.05 * (1.0 - inp.load.clamp(0.0, 1.0));
         // Both pipe networks sit in the same ambient (`MODEL_P_AMB`): the engine model's atmosphere (a function of
@@ -465,6 +514,11 @@ impl EngineSound {
         }
         // convective cooling of the pipes follows road speed
         self.gas.exhaust.net.grid.h_conv = 10.0 + 6.0 * inp.vehicle_speed.max(0.0).powf(0.8);
+    }
+
+    /// Roughly Gaussian (sum of four uniforms), unit variance.
+    fn rand_gauss(&mut self) -> f32 {
+        (self.rand() + self.rand() + self.rand() + self.rand() - 2.0) * 1.732
     }
 
     fn rand(&mut self) -> f32 {
@@ -571,6 +625,15 @@ impl EngineSound {
             self.crank_dw = self.crank_dw.clamp(-lim, lim);
             let target = (-tau_ac / (0.9 * self.starter_t0)).clamp(0.0, 1.0);
             self.strain += (target - self.strain) * (1.0 - (-dt / 0.02).exp());
+        } else if combusting && w_bar > 5.0 {
+            // a running engine: the same crank, driven by the combustion torque, held to its speed by the idle control and
+            // the load (a leak with a corner near 1.5 Hz). What changes slower than that is the engine model's own rpm.
+            self.tau_mean += (self.tau_gas - self.tau_mean) * (1.0 - (-dt / RUN_MEAN_TAU_S).exp());
+            let tau_ac = self.tau_gas - self.tau_mean;
+            self.crank_dw += dt * (tau_ac - self.crank_j * RUN_GOVERNOR_RAD_S * self.crank_dw) / self.crank_j;
+            let lim = RUN_RIPPLE_LIMIT * w_bar;
+            self.crank_dw = self.crank_dw.clamp(-lim, lim);
+            self.strain *= (-dt / 0.05).exp();
         } else {
             let k = (-dt / 0.05).exp();
             self.crank_dw *= k;
@@ -621,6 +684,21 @@ impl EngineSound {
                     tg += (self.gas.res[i].p() - MODEL_P_AMB) * self.gas.geom.dv_dtheta(self.gas.local(i));
                 }
                 self.tau_gas = tg * CRANKING_TORQUE_SCALE;
+            } else if combusting {
+                // the burning cylinders' torque: the pulses that sag and surge the crank within every cycle, and, as
+                // their strength scatters from cycle to cycle, make it wander
+                let mut tg = 0.0;
+                for i in 0..n {
+                    let local = self.gas.local(i);
+                    let prev = self.cyl_prev[i];
+                    // a new cycle's burn begins as the cylinder passes its firing top dead centre
+                    if (prev < 360.0) != (local < 360.0) && local >= 360.0 {
+                        self.cyl_gain[i] = 1.0 + self.gas.cyc_cov * self.rand_gauss() + self.gas.cylinder_bias(i);
+                    }
+                    self.cyl_prev[i] = local;
+                    tg += self.combustion.torque(local, self.input.burn.get(i).copied().unwrap_or(1.0) * self.cyl_gain[i]);
+                }
+                self.tau_gas = tg;
             }
             // engine events for the mechanical layer (firing, valve motion)
             if rpm_eff > 15.0 {
@@ -715,6 +793,7 @@ impl EngineSound {
             combustion,
             valve_events,
             diesel: self.cfg.ignition_type == IgnitionType::Compression,
+            rattle: self.rattle,
             lift_off_pop: 0.0,
         });
         p += p_mech;
@@ -742,6 +821,11 @@ impl EngineSound {
         self.limiter += (env - self.limiter) * rel;
         let g = if self.limiter > 0.5 { 0.5 / self.limiter } else { 1.0 };
         (hp * g * 1.4).tanh() * 0.8 * self.master
+    }
+
+    /// How hard the combustion hits the block now, relative to a petrol engine at idle (analysis).
+    pub fn rattle_level(&self) -> f32 {
+        self.rattle
     }
 
     /// Fractional deviation of the crank's instantaneous speed from the mean while cranking (analysis).

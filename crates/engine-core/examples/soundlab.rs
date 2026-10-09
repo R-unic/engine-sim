@@ -150,6 +150,7 @@ fn main() {
             println!("operating point: {rpm:.0} rpm, throttle {thr:.2}: MAP {:.0} kPa, AFR {:.1}, EGT {:.0} K, load {:.2}", inp.map_pa / 1e3, inp.afr, inp.egt_k, inp.load);
             snd.preheat(inp.egt_k * 0.9);
             snd.set_input(&inp);
+            println!("rattle level {:.2} (petrol idle = 0.72)", snd.rattle_level());
 
             snd.soak(num(&m, "soak", 2.0), 60.0);
             let warm = (num(&m, "warm", 1.0) * fs as f32) as usize;
@@ -515,6 +516,72 @@ fn main() {
             for (dist, name, tg, tw, len) in rows {
                 println!("  {dist:5.2} m  {name:<14} gas {:4.0} C  wall {:4.0} C  (c = {:3.0} m/s, {len:.2} m long)", tg - 273.15, tw - 273.15, Gas::EXHAUST.sound_speed(tg));
             }
+        }
+        "ripple" => {
+            // the crank speed of a running engine: the engine model's own, within the cycle and over many cycles, next to what
+            // the sound model reconstructs from its combustion torque (`--throttle` 0 is the idle)
+            let thr = num(&m, "throttle", 0.0) as f64;
+            let secs = num(&m, "secs", 6.0) as f64;
+            let fuel = fuels().into_iter().find(|f| f.ignition_type == cfg.ignition_type).unwrap();
+            let mut e = CombustionEngine::new(cfg.clone(), &transmissions()[1], &brakes()[0], fuel);
+            e.set_tuning(tuning.clone());
+            e.warm_up();
+            let rpm0 = num(&m, "rpm", cfg.redline_rpm as f32 * 0.13) as f64;
+            let _ = e.steady_point(rpm0, thr.max(0.05));
+            e.set_throttle(thr);
+            for _ in 0..(2.0 / (1.0 / 5000.0)) as usize {
+                e.update(1.0 / 5000.0);
+            }
+            let (mut lo, mut hi, mut acc, mut acc2, mut cnt) = (f64::MAX, 0.0f64, 0.0f64, 0.0f64, 0usize);
+            let mut slow: Vec<f64> = Vec::new();
+            let h = 1.0 / 20_000.0;
+            let mut tmp = 0.0;
+            for k in 0..(secs / h) as usize {
+                e.update(h);
+                let r = e.rpm();
+                lo = lo.min(r);
+                hi = hi.max(r);
+                acc += r;
+                acc2 += r * r;
+                cnt += 1;
+                tmp += r;
+                if (k + 1) % 2000 == 0 {
+                    slow.push(tmp / 2000.0);
+                    tmp = 0.0;
+                }
+            }
+            let mean = acc / cnt as f64;
+            let sd_slow = {
+                let mu = slow.iter().sum::<f64>() / slow.len() as f64;
+                (slow.iter().map(|v| (v - mu).powi(2)).sum::<f64>() / slow.len() as f64).sqrt()
+            };
+            println!("engine model at {mean:.0} rpm: peak to peak {:.2} % within the run, sd of the 0.1 s means {:.2} rpm ({:.2} %)", (hi - lo) / mean * 100.0, sd_slow, sd_slow / mean * 100.0);
+            let _ = acc2;
+            let mut inp = operating_point(&cfg, &tuning, mean, thr.max(0.0));
+            inp.load = (e.telemetry().display_torque_nm / (75.0 * cfg.displacement_l()).max(60.0)).clamp(0.0, 1.3) as f32;
+            snd.preheat(inp.egt_k * 0.9);
+            snd.set_input(&inp);
+            snd.soak(2.0, 60.0);
+            let (mut dmin, mut dmax) = (f32::MAX, f32::MIN);
+            let mut slow_s: Vec<f64> = Vec::new();
+            let mut tmp = 0.0f64;
+            let n = (secs * fs) as usize;
+            for k in 0..n {
+                snd.next_sample();
+                let d = snd.crank_speed_deviation();
+                dmin = dmin.min(d);
+                dmax = dmax.max(d);
+                tmp += d as f64;
+                if (k + 1) % 4410 == 0 {
+                    slow_s.push(tmp / 4410.0);
+                    tmp = 0.0;
+                }
+            }
+            let sd = {
+                let mu = slow_s.iter().sum::<f64>() / slow_s.len() as f64;
+                (slow_s.iter().map(|v| (v - mu).powi(2)).sum::<f64>() / slow_s.len() as f64).sqrt()
+            };
+            println!("sound model: peak to peak {:.2} %, sd of the 0.1 s means {:.2} rpm ({:.2} %)", (dmax - dmin) as f64 * 100.0, sd * mean, sd * 100.0);
         }
         "lift" => {
             // wide open at the start, then off the throttle: the overrun burble
