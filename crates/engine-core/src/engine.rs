@@ -117,6 +117,7 @@ pub struct CombustionEngine {
     unwrapped_crank_angle_deg: f64,
     throttle_target: f64,
     throttle_actual: f64,
+    misfire_holdoff_s: f64,
     brake_input: f64,
     external_load_torque_nm: f64,
 
@@ -125,6 +126,8 @@ pub struct CombustionEngine {
     /// How long the starter must turn the engine over before spark/fuel kick in (0 = instantly).
     ignition_holdoff_s: f64,
     crank_time_s: f64,
+    /// Fast-idle flare after light-off: 1 as the first cylinders fire, decaying away (0 when the engine never waited).
+    start_flare: f64,
     rev_limiting: bool,
     below_stall_duration_s: f64,
 
@@ -194,12 +197,14 @@ impl CombustionEngine {
             unwrapped_crank_angle_deg: 0.0,
             throttle_target: 0.0,
             throttle_actual: 0.0,
+            misfire_holdoff_s: 0.0,
             brake_input: 0.0,
             external_load_torque_nm: 0.0,
             running: false,
             cranking: false,
             ignition_holdoff_s: 0.0,
             crank_time_s: 0.0,
+            start_flare: 0.0,
             rev_limiting: false,
             below_stall_duration_s: 0.0,
             air_temperature_k: DEFAULT_AIR_TEMP_K,
@@ -490,7 +495,15 @@ impl CombustionEngine {
         let dt = raw_dt.min(MAX_SUBSTEPS_PER_FRAME * sub_dt);
 
         let rate = self.config.throttle_response_rate.unwrap_or(THROTTLE_ACTUATOR_RATE);
+        let throttle_before = self.throttle_actual;
         self.throttle_actual += (self.throttle_target - self.throttle_actual).clamp(-rate * dt, rate * dt);
+        // A moving throttle makes the crank speed rise or fall on its own; a real ECU suspends its
+        // misfire monitor through that transient and a short settling period after it.
+        if (self.throttle_actual - throttle_before).abs() > 1.0e-6 {
+            self.misfire_holdoff_s = ECU_MISFIRE_THROTTLE_HOLDOFF_S;
+        } else {
+            self.misfire_holdoff_s = (self.misfire_holdoff_s - dt).max(0.0);
+        }
 
         let substeps = (dt / sub_dt).ceil().max(1.0) as usize;
         // Exact substep so any call length integrates exactly `dt` of simulated time.
@@ -621,10 +634,26 @@ impl CombustionEngine {
                 self.rev_limiting = false;
             }
             if self.cranking {
+                let before = self.crank_time_s;
                 self.crank_time_s += sub_dt;
+                // light-off: the first firings come with a cold-start enrichment and a throttle-plate
+                // opening that flare the engine well above idle before the idle control gets it back
+                if self.ignition_holdoff_s > 0.0 && before < self.ignition_holdoff_s && self.crank_time_s >= self.ignition_holdoff_s {
+                    self.start_flare = 1.0;
+                }
+            }
+            if self.start_flare > 0.0 {
+                self.start_flare *= (-sub_dt / START_FLARE_TAU_S).exp();
+                if self.start_flare < 1.0e-3 || !self.running {
+                    self.start_flare = 0.0;
+                }
             }
             let ignition_enabled = self.running && !self.rev_limiting && !self.is_cranking_unlit();
-            let effective_throttle = if self.running { self.throttle_actual.max(self.idle_throttle_floor_at(rpm)) } else { 0.0 };
+            let effective_throttle = if self.running {
+                self.throttle_actual.max((self.idle_throttle_floor_at(rpm) + START_FLARE_THROTTLE * self.start_flare).min(0.9))
+            } else {
+                0.0
+            };
 
             let (mut afr, manifold_pa);
             if is_compression {
@@ -729,8 +758,10 @@ impl CombustionEngine {
             self.unwrapped_crank_angle_deg = new_angle;
 
             // Misfire monitor reads only crank speed; gated off while cranking, on the rev limiter
-            // (a commanded cut, not a fault) and mid-shift (kinematic speed blend).
-            self.ecu.update(self.running && !self.cranking && !self.rev_limiting && !self.is_shifting, self.angular_velocity, sub_dt);
+            // (a commanded cut, not a fault), mid-shift (kinematic speed blend) and through throttle transients.
+            let misfire_sampling =
+                self.running && !self.cranking && !self.rev_limiting && !self.is_shifting && self.misfire_holdoff_s <= 0.0;
+            self.ecu.update(misfire_sampling, self.angular_velocity, sub_dt);
 
             self.last_indicated_torque_nm = indicated;
             self.last_friction_torque_nm = friction;

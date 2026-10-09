@@ -26,6 +26,9 @@ pub const DISPLAY_SMOOTHING_TAU_S: f64 = 0.3;
 pub const IDLE_RPM: f64 = 800.0;
 pub const IDLE_GOVERNOR_GAIN: f64 = 1.0 / 1500.0;
 pub const IDLE_GOVERNOR_MAX_THROTTLE: f64 = 0.2;
+/// Extra throttle opening at light-off (fast idle / cold-start flare) and how fast it relaxes.
+pub const START_FLARE_THROTTLE: f64 = 0.7;
+pub const START_FLARE_TAU_S: f64 = 0.9;
 pub const STALL_RPM: f64 = 280.0;
 pub const STALL_GRACE_S: f64 = 0.2;
 /// Free-running speed of the starter (torque falls linearly to zero here), so it cranks ~250 rpm.
@@ -131,6 +134,7 @@ pub const ECU_BASELINE_MIN_SAMPLES: usize = 3;
 pub const ECU_MISFIRE_MONITOR_ARM_DELAY_S: f64 = 2.0;
 pub const ECU_MISFIRE_SPEED_DROP_THRESHOLD: f64 = 0.04;
 pub const ECU_MISFIRE_SEVERE_SPEED_DROP_THRESHOLD: f64 = 0.10;
+pub const ECU_MISFIRE_THROTTLE_HOLDOFF_S: f64 = 1.5;
 pub const ECU_MISFIRE_RATE_WINDOW_S: f64 = 10.0;
 pub const ECU_MISFIRE_STORE_COUNT: usize = 3;
 pub const ECU_MISFIRE_ACTIVE_FLASH_WINDOW_S: f64 = 1.5;
