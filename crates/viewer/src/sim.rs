@@ -125,12 +125,11 @@ const IGNITION_HOLDOFF_S: f64 = 1.1;
 /// How much each engine burbles on a lift-off. Big multi-cylinder and sporty engines pop on the
 /// overrun; a diesel never does.
 fn burble_amount(id: &str) -> f32 {
-    match id {
+    match engine_core::layout_of(id) {
         "v12" => 1.0,
         "v16" => 0.9,
         "w16" | "w24" => 0.8,
         "v8" => 0.6,
-        "i4turbo" => 0.6,
         "i6" => 0.5,
         "v6" => 0.4,
         "vtwin" => 0.3,

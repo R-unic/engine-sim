@@ -242,7 +242,7 @@ pub static LESSONS: &[Lesson] = &[
                 "Boost reverses it",
                 "A turbocharger pushes the intake air above atmospheric pressure. The manifold pressure goes up past 101 kPa, and in the pumping view the loop turns green: the incoming air is now pushing the piston down instead of the piston pulling the air in. Floor it in neutral and watch.",
                 Cam::Anchor("Turbocharger"),
-                &[Act::Engine("i4turbo"), Act::Warm, Act::Release, Act::Panel(Panel::Analysis, true), Act::Tab(Tab::Pv), Act::Scale(PvScale::Pumping)],
+                &[Act::Engine("i4_16"), Act::Tune("turbos=1,boost=0.8"), Act::Warm, Act::Release, Act::Panel(Panel::Analysis, true), Act::Tab(Tab::Pv), Act::Scale(PvScale::Pumping)],
                 Some(Goal { text: "Make some boost: hold W", check: |s| s.tel.boost_pressure_pa > 30_000.0 }),
             ),
         ],
@@ -328,9 +328,9 @@ pub static LESSONS: &[Lesson] = &[
         steps: &[
             step(
                 "More air, more power",
-                "An engine's power depends on how much air it can burn. A turbocharger compresses the intake air above atmospheric pressure so more fits into each cylinder, and more fuel can be burnt with it. A small 1.4 litre engine can make the power of a much larger one.",
+                "An engine's power depends on how much air it can burn. A turbocharger compresses the intake air above atmospheric pressure so more fits into each cylinder, and more fuel can be burnt with it. A small 1.6 litre engine can make the power of a much larger one.",
                 Cam::Anchor("Turbocharger"),
-                &[Act::Engine("i4turbo"), Act::Warm, Act::Time(1.0), Act::Pause(false), Act::Labels(true)],
+                &[Act::Engine("i4_16"), Act::Tune("turbos=1,boost=0.8"), Act::Warm, Act::Time(1.0), Act::Pause(false), Act::Labels(true)],
                 None,
             ),
             step(
@@ -351,14 +351,14 @@ pub static LESSONS: &[Lesson] = &[
                 "The intercooler",
                 "Compressing air heats it, and hot air is less dense and more likely to knock. The intercooler is a radiator for the intake air. We have fitted a large front-mounted one: look at the charge temperature in TUNING. The panel shows the dyno change as well.",
                 Cam::Anchor("Turbocharger"),
-                &[Act::Tune("ic=large"), Act::Panel(Panel::Tuning, true), Act::Panel(Panel::Analysis, true), Act::Tab(Tab::Dyno)],
+                &[Act::Tune("turbos=1,boost=0.8,ic=large"), Act::Panel(Panel::Tuning, true), Act::Panel(Panel::Analysis, true), Act::Tab(Tab::Dyno)],
                 None,
             ),
             step(
                 "Knock and octane",
                 "More boost needs more octane. We have raised the boost: if the KNOCK warning appears, the fuel is detonating before the flame reaches it, which can melt pistons. Pull the boost back, or switch to a higher-octane fuel in the ENGINE SIM panel.",
                 Cam::Anchor("Engine"),
-                &[Act::Fuel("regular87"), Act::Tune("ic=large,boost=1.4"), Act::Panel(Panel::Engine, true)],
+                &[Act::Fuel("regular87"), Act::Tune("turbos=1,ic=large,boost=1.4"), Act::Panel(Panel::Engine, true)],
                 Some(Goal { text: "Provoke knock (full throttle in gear), then fix it", check: |s| s.tel.is_knocking }),
             ),
         ],

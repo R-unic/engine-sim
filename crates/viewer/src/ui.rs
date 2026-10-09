@@ -477,7 +477,7 @@ fn telemetry_window(ctx: &egui::Context, st: &mut UiState, sim: &mut Sim) {
             row(ui, "Torque", "torque", format!("{:5.0} Nm  {:4.0} lb-ft", t.display_torque_nm, t.display_torque_lb_ft));
             row(ui, "Power", "power", format!("{:5.0} hp  {:4.0} kW", t.display_horsepower, t.display_horsepower * 0.7457));
             row(ui, "Manifold", "manifold", format!("{:5.0} kPa  ({:+.2} bar)", t.manifold_pressure_pa / 1000.0, (t.manifold_pressure_pa - t.atmospheric_pressure_pa) / 100_000.0));
-            if sim.cfg().turbo.is_some() {
+            if t.turbo_count > 0 {
                 row(ui, "Boost", "boost", format!("{:5.2} bar  spool {:3.0}%", t.boost_pressure_pa / 100_000.0, t.turbo_spool_fraction * 100.0));
             }
             row(ui, "AFR", "afr", format!("{:5.1}  (O2 {:.1}, trim {:+.1})", t.air_fuel_ratio, t.exhaust.o2_reported_afr, t.exhaust.fuel_trim_afr));

@@ -220,6 +220,11 @@ mod tests {
             l.sort();
             assert_eq!(l[1] - l[0], 1, "V8 throw pairs {:?}", l);
         }
+        // the flat-plane 5.0 (a V8 by its id prefix) has its own firing order but the same four two-rod throws
+        let flat = by("v8_50");
+        assert_eq!(flat.tilts.len(), 2);
+        assert_eq!(flat.throws.len(), 4);
+        assert!(flat.throws.iter().all(|t| t.cyls.len() == 2));
         // inline engines: one cylinder per throw
         assert_eq!(by("i6").throws.len(), 6);
         assert_eq!(by("i4").throws.len(), 4);

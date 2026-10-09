@@ -24,7 +24,7 @@ fn all_engines_idle_and_rev() {
 #[test]
 fn dyno_matches_reference_figures() {
     // Reference figures documented by the original TS sim's dyno pass.
-    let cases = [("v8", 422.0, 5860.0), ("i4turbo", 152.0, 5400.0)];
+    let cases = [("v8", 422.0, 5860.0)];
     for (id, ref_hp, ref_rpm) in cases {
         let mut e = build_default(engine_by_id(id).unwrap());
         e.warm_up();
@@ -139,7 +139,7 @@ fn evap_test_passes_when_sealed_and_fails_with_a_leak() {
 #[test]
 fn healthy_engines_never_light_the_cel_at_idle_or_cruise() {
     use engine_core::CelState;
-    for id in ["i4turbo", "v8", "i6", "v6"] {
+    for id in ["i4_16", "v8", "i6", "v6"] {
         let mut e = build_default(engine_by_id(id).unwrap());
         e.engage_starter();
         let mut t = 0.0f64;
@@ -162,7 +162,7 @@ fn healthy_engines_never_light_the_cel_at_idle_or_cruise() {
 #[test]
 fn clutch_dump_and_wot_launch_does_not_look_like_a_misfire() {
     use engine_core::CelState;
-    for id in ["i4turbo", "v8", "i6"] {
+    for id in ["i4_16", "v8", "i6"] {
         let mut e = build_default(engine_by_id(id).unwrap());
         let gears = engine_core::transmissions().into_iter().find(|t| t.id == "6speed").unwrap().gears;
         e.engage_starter();
@@ -212,7 +212,7 @@ fn peak(id: &str, tuning: &Tuning) -> (f64, f64) {
 #[test]
 fn stock_tuning_is_exactly_the_stock_engine() {
     // a default Tuning must not move any figure the reference dyno pins down
-    for id in ["v8", "i4turbo", "v12", "dieseli6"] {
+    for id in ["v8", "i4_16", "v12", "dieseli6"] {
         let cfg = engine_by_id(id).unwrap();
         let fuel = fuels().into_iter().find(|f| f.ignition_type == cfg.ignition_type).unwrap();
         let a = dyno_curve(&cfg, &fuel, &Tuning::default(), 500.0);
@@ -292,16 +292,15 @@ fn boost_slider_and_intercooler_do_what_they_say() {
 }
 
 #[test]
-fn stock_turbo_engines_keep_their_stock_hardware() {
-    for (id, n) in [("i4turbo", 1u8), ("v6", 2), ("w16", 4), ("dieseli6", 1)] {
-        let cfg = engine_by_id(id).unwrap();
-        let setup = Tuning::default().turbo_setup(&cfg).unwrap();
-        let stock = cfg.turbo.clone().unwrap();
-        assert_eq!(setup.count, n, "{id}");
-        assert!((setup.max_boost_pa - stock.max_boost_pa).abs() < 1.0, "{id}");
-        assert!((setup.full_spool_rpm - stock.full_spool_rpm).abs() < 1e-6, "{id}");
-        assert!((setup.spool_tau_s - stock.spool_time_constant_s).abs() < 1e-9, "{id}");
-        assert!(setup.choke_rpm > cfg.redline_rpm, "{id} stock turbo must not choke below redline");
+fn no_engine_ships_with_a_turbo_but_every_one_can_take_one() {
+    for cfg in engines() {
+        let id = &cfg.id;
+        assert!(cfg.turbo.is_none(), "{id}: turbos are fitted in the tuning panel, not baked into an engine");
+        assert!(Tuning::default().turbo_setup(&cfg).is_none(), "{id}");
+        let kit = Tuning { turbo_count: Some(1), ..Tuning::default() };
+        let setup = kit.turbo_setup(&cfg).unwrap();
+        assert_eq!(setup.count, 1, "{id}");
+        assert!(setup.max_boost_pa > 0.0 && setup.full_spool_rpm < cfg.redline_rpm, "{id}");
     }
 }
 
@@ -333,5 +332,35 @@ fn modded_engines_still_idle_and_start() {
         let tel = e.telemetry();
         println!("{id}: modded idle {:.0} rpm", tel.rpm);
         assert!(tel.is_running && (400.0..1600.0).contains(&tel.rpm), "{id} idle {}", tel.rpm);
+    }
+}
+
+#[test]
+fn throttle_blips_and_lifts_do_not_light_the_cel() {
+    use engine_core::CelState;
+    for id in ["i4", "i4_25", "v6", "v8", "i6", "v12", "vtwin", "v16", "w16"] {
+        let mut e = build_default(engine_by_id(id).unwrap());
+        e.engage_starter();
+        let mut t = 0.0f64;
+        let mut first_lit: Option<f64> = None;
+        while t < 80.0 {
+            if e.rpm() > 650.0 {
+                e.release_starter();
+            }
+            // blip / lift pattern at neutral
+            let ph = (t % 6.0) / 6.0;
+            if t > 8.0 {
+                e.set_throttle(if ph < 0.3 { 0.0 } else if ph < 0.5 { 1.0 } else if ph < 0.6 { 0.0 } else { 0.4 });
+            }
+            e.update(1.0 / 120.0);
+            t += 1.0 / 120.0;
+            if first_lit.is_none() && e.telemetry().cel_state != CelState::Off {
+                first_lit = Some(t);
+                let tl = e.telemetry();
+                println!("{id}: t={t:.1} monitors {:?} rpm {:.0} thr {:.2} afr {:.1}", e.ecu_fault_flags(), tl.rpm, tl.throttle, tl.air_fuel_ratio);
+            }
+        }
+        println!("{id}: blips -> first CEL {first_lit:?}");
+        assert!(first_lit.is_none(), "{id}: CEL lit at {first_lit:?} from throttle blips on a healthy engine");
     }
 }

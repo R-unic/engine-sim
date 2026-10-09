@@ -352,14 +352,7 @@ impl Default for Tuning {
 
 /// How many turbos the stock engine ships with (the figure the turbo config describes).
 pub fn stock_turbo_count(cfg: &EngineConfig) -> u8 {
-    if cfg.turbo.is_none() {
-        return 0;
-    }
-    match cfg.id.as_str() {
-        "w16" => 4,
-        "v6" => 2,
-        _ => 1,
-    }
+    u8::from(cfg.turbo.is_some())
 }
 
 /// The turbo setup the sim actually runs, resolved against the stock engine.

@@ -56,10 +56,16 @@ impl EngineConfig {
     }
 }
 
+/// The cylinder layout an engine id belongs to: the id up to the first `_` ("v8_50" -> "v8").
+pub fn layout_of(id: &str) -> &str {
+    id.split('_').next().unwrap_or(id)
+}
+
 /// Bank tilt angles (degrees from vertical, about the crank axis) for the renderer. The sim
 /// itself is layout-agnostic; this only tells the 3D rig where to put the cylinder banks.
+/// Variants of one layout share its prefix: `v8_50` is a `v8`.
 pub fn bank_tilts_deg(id: &str) -> Vec<f64> {
-    match id {
+    match layout_of(id) {
         "vtwin" => vec![-22.5, 22.5],
         "v6" => vec![-30.0, 30.0],
         "v8" => vec![-45.0, 45.0],

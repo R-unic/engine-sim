@@ -14,7 +14,7 @@ pub mod sound;
 pub mod tuning;
 
 pub use config::{
-    bank_tilts_deg, brakes, engine_by_id, engines, fuels, transmissions, BrakeConfig, EngineConfig, FuelConfig,
+    bank_tilts_deg, brakes, engine_by_id, engines, fuels, layout_of, transmissions, BrakeConfig, EngineConfig, FuelConfig,
     IgnitionType, TransmissionConfig, TurboConfig,
 };
 pub use acoustics::PipeMaterial;
