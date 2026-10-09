@@ -204,13 +204,16 @@ fn quality_of(level: u8) -> Quality {
     Quality::level(level)
 }
 
-/// Picks the finest solver tier the machine keeps up with. The worker feeds it the smoothed fraction of real
-/// time it spends rendering; it answers with a new ladder level (1 = finest) when one is due. Finer tiers cost
-/// about `STEP_COST` times the next coarser one, which lets it jump several levels at once.
+/// Picks the solver tier. A change of tier is audible - the finer solvers carry more of the 300 Hz-3 kHz body, and a
+/// swap in the middle of a pull is a step in the sound however carefully it is faded - so the policy is to choose
+/// *once*, from a short benchmark of the engine (`pick`), and to change afterwards only when it must: a sustained
+/// overload steps down at once, a machine that has been idle for a long time steps up once in a while. The worker
+/// feeds it the smoothed fraction of real time it spends rendering; it answers with a new ladder level (1 = finest)
+/// when one is due. Finer tiers cost about `STEP_COST` times the next coarser one, which lets it jump several levels.
 #[derive(Clone, Debug)]
 pub struct AutoQuality {
     level: u8,
-    /// The finest level worth trying: raised when a finer one proved too heavy, forgotten after a while.
+    /// The finest level worth trying: raised when a finer one proved too heavy, forgotten after a long while.
     floor: u8,
     floor_at: f32,
     changed_at: f32,
@@ -220,19 +223,24 @@ pub struct AutoQuality {
 
 impl AutoQuality {
     /// Load above which the solver is too heavy, for how long, and the load a coarser tier is aimed at.
-    pub const OVERLOAD: f32 = 0.75;
-    const OVERLOAD_FOR: f32 = 0.8;
-    const AIM_DOWN: f32 = 0.6;
-    /// Load below which a finer tier is worth trying, for how long. Wide open throttle costs a good deal more
-    /// than the idle the engine usually starts at, so the aim leaves room for that.
-    const AIM_UP: f32 = 0.40;
-    const CALM: f32 = 0.28;
-    const CALM_FOR: f32 = 2.5;
+    pub const OVERLOAD: f32 = 0.80;
+    const OVERLOAD_FOR: f32 = 1.2;
+    const AIM_DOWN: f32 = 0.5;
+    /// Load below which a finer tier is worth trying, for how long (the benchmark is taken at a hard working point,
+    /// so a calm machine is calm at every other one too).
+    const CALM: f32 = 0.20;
+    const CALM_FOR: f32 = 20.0;
+    /// Quiet time after any change before the next one (up) is considered.
+    const COOLDOWN_UP: f32 = 45.0;
     /// After a change the load estimate needs time to settle.
-    const SETTLE: f32 = 2.0;
+    const SETTLE: f32 = 3.0;
     /// What one tier finer costs, relative to the one above it.
-    pub const STEP_COST: f32 = 1.6;
-    const FLOOR_MEMORY: f32 = 180.0;
+    pub const STEP_COST: f32 = 1.45;
+    const FLOOR_MEMORY: f32 = 300.0;
+    /// The cost the benchmark aims at: well inside one core, so the model that is built beside the current one for a
+    /// hand-over (which doubles the work for a moment) and a hard pull do not starve the ring. (The benchmark is a hard
+    /// working point and the live load of the same tier is about 0.6 of it.)
+    pub const AIM_COST: f32 = 0.50;
     pub const START_LEVEL: u8 = 3;
 
     pub fn new() -> Self {
@@ -243,9 +251,24 @@ impl AutoQuality {
         self.level
     }
 
-    /// A different engine: its cost is unknown.
-    pub fn reset(&mut self, t: f32) {
-        *self = AutoQuality { changed_at: t, ..AutoQuality::new() };
+    /// The finest tier whose predicted cost stays under `AIM_COST`, given the measured cost (fraction of real time)
+    /// of the middle tier (3) at a hard working point.
+    pub fn pick(cost_mid: f32) -> u8 {
+        let mut level = 5u8;
+        for l in (1..=5u8).rev() {
+            let cost = cost_mid * Self::STEP_COST.powi(3 - l as i32);
+            if cost <= Self::AIM_COST {
+                level = l;
+            } else {
+                break;
+            }
+        }
+        level
+    }
+
+    /// A different engine: start from the level its benchmark gave.
+    pub fn reset(&mut self, t: f32, level: u8) {
+        *self = AutoQuality { level: level.clamp(1, 5), changed_at: t, ..AutoQuality::new() };
     }
 
     /// Feeds the smoothed load at time `t` (seconds); returns the new level when it changes.
@@ -270,11 +293,11 @@ impl AutoQuality {
             return None;
         }
         self.over_since = None;
-        if load < Self::CALM && self.level > self.floor {
+        if load < Self::CALM && self.level > self.floor && t - self.changed_at > Self::COOLDOWN_UP {
             let since = *self.calm_since.get_or_insert(t);
             if t - since >= Self::CALM_FOR {
-                let k = ((Self::AIM_UP / load.max(0.01)).ln() / Self::STEP_COST.ln()).floor().max(1.0) as u8;
-                self.level = self.level.saturating_sub(k).max(self.floor).max(1);
+                // one tier at a time: a step up is the part of the policy a listener can notice
+                self.level = (self.level - 1).max(self.floor).max(1);
                 return Some(self.changed(t));
             }
         } else {
@@ -289,6 +312,49 @@ impl AutoQuality {
         self.calm_since = None;
         self.level
     }
+}
+
+/// The model's cost at a hard working point (0.7 of the redline's revs, nearly wide open, which is where the pipes
+/// are busiest) on the middle tier, as a fraction of real time on this thread. A throw-away model renders a third of
+/// a second of audio after a short warm-up.
+fn benchmark_cost(engine: &str, tuning: &Tuning, banks: &[u8]) -> Option<f32> {
+    let cfg = engine_by_id(engine)?;
+    let mut m = EngineSound::new(&cfg, tuning, banks, Quality::BALANCED);
+    m.preheat(950.0);
+    let rpm = (cfg.redline_rpm as f32 * 0.7).clamp(2500.0, 5000.0);
+    m.set_input(&SoundInput {
+        rpm,
+        throttle: 0.9,
+        load: 0.95,
+        map_pa: 92_000.0,
+        atm_pa: 101_325.0,
+        air_k: 293.0,
+        charge_k: 305.0,
+        afr: 12.8,
+        egt_k: 950.0,
+        running: true,
+        lit: true,
+        burn: vec![1.0; cfg.cylinder_count],
+        master: 1.0,
+        serial: 1,
+        ..Default::default()
+    });
+    let mut buf = vec![0.0f32; CHUNK];
+    for _ in 0..(SAMPLE_RATE as usize / 8 / CHUNK) {
+        m.render(&mut buf);
+    }
+    // two runs, the better one: the first meets cold caches, a processor that has not yet clocked up and the rest of
+    // the program starting at the same moment, and says the machine is slower than it is
+    let n = SAMPLE_RATE as usize / 5 / CHUNK;
+    let mut best = f32::MAX;
+    for _ in 0..2 {
+        let t0 = Instant::now();
+        for _ in 0..n {
+            m.render(&mut buf);
+        }
+        best = best.min(t0.elapsed().as_secs_f32() / (n * CHUNK) as f32 * SAMPLE_RATE as f32);
+    }
+    Some(best)
 }
 
 /// Short ramps around a rebuild of the model, so the new one never starts (or the old one stops) with a jump.
@@ -320,9 +386,10 @@ struct Incoming {
 }
 
 /// Samples the replacement runs before it is heard (0.25 s: its pipes need a few cycles to establish the pulses),
-/// and the length of the cross-fade (40 ms).
+/// and the length of the cross-fade (0.2 s: the tiers differ in how much body they carry, and a step of a few dB is
+/// a morph over a fifth of a second and a click over 40 ms).
 const PRIME: usize = 11_025;
-const XFADE: usize = 1_764;
+const XFADE: usize = 8_820;
 
 impl Incoming {
     /// Renders the replacement's next `chunk.len()` samples and mixes them into `chunk` (the current model's) once it
@@ -387,7 +454,14 @@ fn spawn_worker(state: std::sync::Weak<Mutex<AudioState>>, ring: Arc<Ring>) {
                 }
                 if snap.engine_id != last_engine {
                     last_engine = snap.engine_id.clone();
-                    auto.reset(clock.elapsed().as_secs_f32());
+                    // the first tier is chosen from a benchmark of this engine, not guessed and climbed to
+                    let level = benchmark_cost(&snap.engine_id, &snap.tuning, &snap.banks).map_or(AutoQuality::START_LEVEL, |c| {
+                        if log {
+                            eprintln!("SOUND benchmark {}: {:.0}% of a core on the middle tier", snap.engine_id, c * 100.0);
+                        }
+                        AutoQuality::pick(c)
+                    });
+                    auto.reset(clock.elapsed().as_secs_f32(), level);
                     load_avg = 0.0;
                 }
                 let pref = if snap.quality_pref == 0 { auto.level() } else { snap.quality_pref.clamp(1, 5) };
@@ -464,7 +538,11 @@ fn spawn_worker(state: std::sync::Weak<Mutex<AudioState>>, ring: Arc<Ring>) {
                 if rendered > 0 {
                     let spent = t0.elapsed().as_secs_f32();
                     let audio = rendered as f32 / SAMPLE_RATE as f32;
-                    load_avg += (spent / audio - load_avg) * 0.05;
+                    // while a replacement renders beside the model the work is doubled for a moment: that is no
+                    // measure of the tier
+                    if incoming.is_none() {
+                        load_avg += (spent / audio - load_avg) * 0.05;
+                    }
                     // the finest solver the machine keeps up with
                     if snap.quality_pref == 0 {
                         if let Some(new) = auto.update(load_avg, clock.elapsed().as_secs_f32()) {
@@ -671,25 +749,42 @@ mod tests {
     }
 
     #[test]
-    fn auto_quality_goes_finer_on_a_calm_machine_and_coarser_when_overloaded() {
-        // idle load far below the threshold: it jumps to the finest tier after the settling and calm times
-        let mut a = AutoQuality::new();
-        assert_eq!(a.level(), AutoQuality::START_LEVEL);
-        let (t, l) = feed(&mut a, 0.10, 0.0, 30.0).expect("a calm machine must refine");
-        assert_eq!(l, 1);
-        assert!(t > 2.0 && t < 6.0, "refined at {t} s");
+    fn the_benchmark_picks_the_finest_tier_that_leaves_room() {
+        assert_eq!(AutoQuality::pick(0.05), 1, "a light engine gets the finest tier");
+        assert_eq!(AutoQuality::pick(0.20), 1);
+        assert_eq!(AutoQuality::pick(0.30), 2);
+        assert_eq!(AutoQuality::pick(0.45), 3);
+        assert_eq!(AutoQuality::pick(0.60), 4);
+        assert_eq!(AutoQuality::pick(2.00), 5, "an engine too heavy for any tier still gets the coarsest");
+        // a finer tier costs more, so the pick never gets finer as the engine gets heavier
+        let mut last = 1;
+        for c in (1..400).map(|i| i as f32 * 0.01) {
+            let l = AutoQuality::pick(c);
+            assert!(l >= last);
+            last = l;
+        }
+    }
 
+    #[test]
+    fn auto_quality_steps_down_at_once_when_overloaded_and_up_only_after_a_long_calm() {
         // overloaded at level 3: it drops, several tiers at once when the overload is large
         let mut b = AutoQuality::new();
-        let (_, l) = feed(&mut b, 1.2, 0.0, 30.0).expect("an overloaded solver must coarsen");
+        let (t, l) = feed(&mut b, 1.2, 0.0, 30.0).expect("an overloaded solver must coarsen");
         assert_eq!(l, 5);
+        assert!(t < 6.0, "overload took {t} s to answer");
         let mut c = AutoQuality::new();
-        let (_, l) = feed(&mut c, 0.80, 0.0, 30.0).expect("a slightly overloaded solver must coarsen");
-        assert_eq!(l, 4, "0.8 of a core is one tier too heavy, not three");
+        let (_, l) = feed(&mut c, 0.85, 0.0, 30.0).expect("a slightly overloaded solver must coarsen");
+        assert_eq!(l, 5, "0.85 of a core needs two tiers to get inside half a core");
 
-        // between the thresholds nothing changes
+        // a calm machine steps up one tier, and only after a long quiet time: a change is a change in the sound
+        let mut a = AutoQuality::new();
+        let (t, l) = feed(&mut a, 0.10, 0.0, 300.0).expect("a calm machine must refine, eventually");
+        assert_eq!(l, 2, "one tier at a time");
+        assert!(t > 40.0, "refined at {t} s");
+
+        // between the thresholds nothing ever changes
         let mut d = AutoQuality::new();
-        assert!(feed(&mut d, 0.5, 0.0, 120.0).is_none());
+        assert!(feed(&mut d, 0.5, 0.0, 600.0).is_none());
     }
 
     #[test]
@@ -698,25 +793,25 @@ mod tests {
         let (t, l) = feed(&mut a, 1.0, 0.0, 30.0).unwrap();
         assert!(l >= 4);
         // the machine now looks calm, but the finer tier just proved too heavy: it stays put for minutes
-        assert!(feed(&mut a, 0.15, t, 120.0).is_none(), "refined into the tier that had just overloaded");
+        assert!(feed(&mut a, 0.10, t, 250.0).is_none(), "refined into the tier that had just overloaded");
         // much later it may try again
-        let again = feed(&mut a, 0.15, t + 120.0, 120.0);
+        let again = feed(&mut a, 0.10, t + 250.0, 300.0);
         assert!(again.is_some(), "it never tries a finer tier again");
-        // a different engine starts over from the middle of the ladder
-        a.reset(500.0);
-        assert_eq!(a.level(), AutoQuality::START_LEVEL);
+        // a different engine starts over from the level its benchmark gave
+        a.reset(500.0, 2);
+        assert_eq!(a.level(), 2);
     }
 
     /// Renders scripted drives through the live path (sim -> `sound_input` -> model) and writes them as WAVs for
     /// the spectral tools: `cargo test --release -p viewer render_drive_scenarios -- --ignored --nocapture`.
-    /// `DRIVE_ENGINES=v8,i4turbo` picks the engines, `DRIVE_OUT` the folder, `DRIVE_QUALITY` the ladder level.
+    /// `DRIVE_ENGINES=v8,i4` picks the engines, `DRIVE_OUT` the folder, `DRIVE_QUALITY` the ladder level.
     #[test]
     #[ignore]
     fn render_drive_scenarios() {
         let out_dir = std::env::var("DRIVE_OUT").unwrap_or_else(|_| "../../target/soundlab".into());
         std::fs::create_dir_all(&out_dir).unwrap();
         let level: u8 = std::env::var("DRIVE_QUALITY").ok().and_then(|v| v.parse().ok()).unwrap_or(2);
-        let ids = std::env::var("DRIVE_ENGINES").unwrap_or_else(|_| "v8,i4turbo,v12,i6".into());
+        let ids = std::env::var("DRIVE_ENGINES").unwrap_or_else(|_| "v8,i4,v12,i6".into());
         for id in ids.split(',') {
             let script = |t: f32, sim: &mut Sim| {
                 start_script(t, sim);
@@ -740,6 +835,59 @@ mod tests {
             let csv: String = log.iter().step_by(6).map(|(t, r)| format!("{t:.2},{r:.0}\n")).collect();
             std::fs::write(format!("{base}_rpm.csv"), csv).unwrap();
             println!("DRIVE {id}: {} s written to {base}.wav, {pops} pops, peak {:.3}", x.len() as f32 / SAMPLE_RATE as f32, x.iter().fold(0.0f32, |a, v| a.max(v.abs())));
+        }
+    }
+
+    /// Named scenarios for the problems that only show up in the live path: `highgear` (wide open in the top gear,
+    /// the revs climbing to the limiter), `shutoff` (revved in neutral, then the key goes off), `coast` (in gear at
+    /// speed, then the key goes off and the car rolls on). `DRIVE_SCENARIOS`, `DRIVE_ENGINES`, `DRIVE_OUT`, `DRIVE_QUALITY`.
+    #[test]
+    #[ignore]
+    fn render_problem_scenarios() {
+        let out_dir = std::env::var("DRIVE_OUT").unwrap_or_else(|_| "../../target/soundlab".into());
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let level: u8 = std::env::var("DRIVE_QUALITY").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+        let ids = std::env::var("DRIVE_ENGINES").unwrap_or_else(|_| "v8,i4,v6".into());
+        let scen = std::env::var("DRIVE_SCENARIOS").unwrap_or_else(|_| "highgear,shutoff,coast".into());
+        for id in ids.split(',') {
+            for sc in scen.split(',') {
+                let script = |t: f32, sim: &mut Sim| {
+                    start_script(t, sim);
+                    match sc {
+                        "highgear" => {
+                            sim.auto_shift = true;
+                            if sim.gear_idx == 1 && t > 4.0 && t < 4.1 {
+                                sim.set_gear_index(2);
+                            }
+                            sim.throttle_input = if t < 4.5 { 0.0 } else { 1.0 };
+                        }
+                        "shutoff" => {
+                            sim.auto_shift = false;
+                            sim.throttle_input = if (5.0..9.0).contains(&t) { 0.7 } else { 0.0 };
+                            if t > 9.0 && sim.tel.is_running {
+                                sim.engine.shut_off();
+                            }
+                        }
+                        _ => {
+                            sim.auto_shift = true;
+                            if sim.gear_idx == 1 && t > 4.0 && t < 4.1 {
+                                sim.set_gear_index(2);
+                            }
+                            sim.throttle_input = if (4.5..16.0).contains(&t) { 0.6 } else { 0.0 };
+                            if t > 16.0 && sim.tel.is_running {
+                                sim.engine.shut_off();
+                            }
+                        }
+                    }
+                };
+                let secs = if sc == "highgear" { 45.0 } else { 30.0 };
+                let (x, log, _) = run(id, secs, quality_of(level), script);
+                let base = format!("{out_dir}/{sc}_{id}");
+                engine_core::acoustics::analysis::write_wav(&format!("{base}.wav"), &x, SAMPLE_RATE).unwrap();
+                let csv: String = log.iter().step_by(6).map(|(t, r)| format!("{t:.2},{r:.0}\n")).collect();
+                std::fs::write(format!("{base}_rpm.csv"), csv).unwrap();
+                println!("SCENARIO {sc} {id}: {} s written to {base}.wav", x.len() as f32 / SAMPLE_RATE as f32);
+            }
         }
     }
 
@@ -832,6 +980,19 @@ mod tests {
             let base = format!("{out_dir}/swap_{id}");
             engine_core::acoustics::analysis::write_wav(&format!("{base}.wav"), &x, SAMPLE_RATE).unwrap();
             println!("SWAP {id}: written to {base}.wav");
+        }
+    }
+
+    /// Which tier the benchmark picks for every engine on this machine: `cargo test --release -p viewer print_auto_tiers -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn print_auto_tiers() {
+        for e in engine_core::engines() {
+            let cfg = engine_by_id(&e.id).unwrap();
+            let banks = engine_core::sound::default_banks(&cfg);
+            let t = Tuning::default();
+            let c = benchmark_cost(&e.id, &t, &banks).unwrap();
+            println!("TIER {:>9}: benchmark {:.0}% of a core on the middle tier -> level {}", e.id, c * 100.0, AutoQuality::pick(c));
         }
     }
 

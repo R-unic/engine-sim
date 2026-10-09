@@ -64,7 +64,7 @@ pub fn tip(key: &str) -> &'static str {
         "t_boost" => "The wastegate setting: the most boost the turbo is allowed to make. More boost means more power and more risk of knock and heat.",
         "t_intercooler" => "A radiator for the compressed intake air. Cooler air is denser (more power) and less prone to knock.",
         "t_presets" => "Ready-made bolt-on sets. Try one, then watch the DYNO chart, the sound and the 3D rig change.",
-        "t_quality" => "How finely the exhaust sound solver divides the pipes (ultra 20 mm cells ... eco 70 mm). Finer cells keep more of the top end and use more CPU; Auto picks the finest tier your computer keeps up with and backs off if it falls behind.",
+        "t_quality" => "How finely the exhaust sound solver divides the pipes (ultra 20 mm cells ... eco 70 mm). Finer cells keep more of the top end and use more CPU; Auto times the engine on your computer when it is chosen, picks the finest tier with room to spare, and then stays on it (a change of tier is a change in the sound) unless the computer falls behind.",
 
         // ---- analysis
         "pv" => "Pressure against cylinder volume for one full cycle. The area enclosed by the loop is the work the gas did on the piston. A big upper loop (green) is good; the small lower loop is the pumping loss of pulling air through the throttle and pushing exhaust out.",
