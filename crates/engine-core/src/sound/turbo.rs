@@ -163,7 +163,7 @@ impl Turbo {
             match c.blow_off {
                 BlowOff::Recirculating => {
                     self.bov_t = 0.0;
-                    self.bov_amp = self.hold.clamp(0.0, 1.2) * 0.4;
+                    self.bov_amp = self.hold.clamp(0.0, 1.2) * 0.2;
                     self.bov_decay = 0.07;
                 }
                 BlowOff::Vented => {
@@ -195,13 +195,13 @@ impl Turbo {
             self.phase2 = (self.phase2 + f1 * 0.617 * dt).fract();
             let tone = (self.phase1 * tau).sin() + 0.4 * (self.phase2 * tau).sin() + 0.2 * (self.phase1 * 2.0 * tau).sin();
             let pulse = 1.0 + 0.22 * (c.fire_phase * tau).sin();
-            out += tone * flutter * pulse * flutter_am * 0.065 * sp.powf(1.5) * air * self.on;
+            out += tone * flutter * pulse * flutter_am * 0.18 * sp.powf(1.5) * air * self.on;
             // the air the wheel moves: a rush from 1.2 to 6 kHz, and the turbine's rumble under it
             self.hp += (n - self.hp) * (1.0 - (-tau * 1200.0 * dt).exp());
             let x = n - self.hp;
             self.lp1 += (x - self.lp1) * (1.0 - (-tau * 6000.0 * dt).exp());
             self.lp2 += (self.lp1 - self.lp2) * (1.0 - (-tau * 6000.0 * dt).exp());
-            out += self.lp2 * 0.03 * sp.powf(1.8) * air.powf(1.2) * self.on;
+            out += self.lp2 * 0.08 * sp.powf(1.8) * air.powf(1.2) * self.on;
             self.rumble += (n - self.rumble) * (0.04 + 0.08 * sp);
             out += self.rumble * 0.008 * sp * (0.3 + c.boost.min(1.2)) * self.on;
         }
@@ -215,7 +215,7 @@ impl Turbo {
             self.bov_lp += (x - self.bov_lp) * (1.0 - (-tau * 6500.0 * dt).exp());
             // the jet's own whistle drops as the pressure behind it falls
             self.bov_phase = (self.bov_phase + (1800.0 + 2200.0 * env) * dt).fract();
-            out += (self.bov_lp * 1.1 + (self.bov_phase * tau).sin() * 0.1) * env * self.bov_amp;
+            out += (self.bov_lp * 10.0 + (self.bov_phase * tau).sin() * 1.0) * env * self.bov_amp;
             self.bov_t += dt;
             if env < 1.0e-3 && t > 0.05 {
                 self.bov_t = -1.0;
@@ -237,7 +237,7 @@ impl Turbo {
                     self.pulse_f0 = (0.45 * Self::whistle_hz(sp)).clamp(450.0, 1100.0);
                     self.pulse_phase = 0.0;
                     // the thump of the wave hitting the closed throttle
-                    kick = self.pulse_amp * 3.0;
+                    kick = self.pulse_amp * 24.0;
                 }
             }
         }
@@ -253,7 +253,7 @@ impl Turbo {
                 self.pulse_hp += (n - self.pulse_hp) * (1.0 - (-tau * 600.0 * dt).exp());
                 let x2 = n - self.pulse_hp;
                 self.pulse_lp += (x2 - self.pulse_lp) * (1.0 - (-tau * 4000.0 * dt).exp());
-                out += self.pulse_amp * env * (tone * 0.12 + self.pulse_lp * 0.22);
+                out += self.pulse_amp * env * (tone * 0.9 + self.pulse_lp * 1.8);
                 self.pulse_t += dt;
             }
         }

@@ -26,6 +26,10 @@ tools/sound/compare_refs.sh [tag] [quick]     decode the references, render the 
 | `bandrel.py` | per-octave level of one window against another of the same file (a key turn against the idle after it), their difference and totals: `bandrel.py file.wav:t0:t1:t0:t1` |
 | `tonality.py` | how far the strongest spectral line stands out of its surroundings (dB), where it is, the share of 40-1500 Hz power in the three strongest lines and how many lines are within 15 dB, by engine and rpm bin: a drone is a line 25+ dB out carrying a third of the power: `tonality.py DIR [engine ...]` |
 | `fold.py`, `foldplot.py` | fold a steady `soundlab --dump` at the engine cycle (rms per slice / the averaged waveform as a PNG with the firing events marked): shows which firings are loud and which are weak, i.e. where the half orders come from |
+| `zoomspec.py` | spectrogram of a short window with a short FFT, to see single events (a pop, a flutter chirp, one diesel clatter): `file.wav out.png fmin fmax win_s t0 t1` |
+| `pops.py` | detects bangs in the 1.5-8 kHz band (a 2 ms envelope more than `THR` dB, default 12, over its 200 ms median) and prints their level, decay, centroid and spacing: `file.wav[:t0:t1] ...` |
+| `hfcrest.py` | how peaky the 1.5-8 kHz and 0.3-1.5 kHz envelopes are: their 90th / 99th / 99.9th percentile over the median, dB. Rally cars on the overrun: p99 17-32, p99.9 25-37; steady engine noise 8 / 10 |
+| `refbands.py` | the six band levels, the low end re the body and the strongest low line, second by second, of recordings: `file.wav ...` |
 | `scan.py` | artifact scanner: clicks and pops, waveform discontinuities, persistent stray tones: `file.wav ...` |
 | `rawwav.py` | raw f32 (`soundlab --dump`) to a 16-bit WAV for the tools above |
 

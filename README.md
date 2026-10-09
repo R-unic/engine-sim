@@ -343,9 +343,37 @@ band under 150 Hz and the band 260-1500 Hz of what the engine already makes and 
 -3 dB of the second at idle, -5 dB at 2000 rpm and -6.5 dB from 3000: orders phase-locked to the crank angle, each wandering in
 level and phase (a rough rumble, not a hum). A cross-plane V8, a four or a diesel, which have their low end, get nothing; a
 V12 at idle goes from -8 to 0 dB, the V6 at speed from -19..-25 to -10..-14 and the I6 from -14..-12 to -9..-7. Engines of 8 to 16
-cylinders get a floor up to 5 dB deeper (2 dB at idle, all of it from 2000 rpm): sixteen near-identical firings are the furthest from
+cylinders get a floor up to 7.5 dB deeper (3 dB at idle, all of it from 2000 rpm): sixteen near-identical firings are the furthest from
 the matched idealisation, and a W16 had its 80-200 Hz band 6 dB under the W24's (whose unbalanced sides give it low orders for free) and
-its note a hollow buzz on a 250-300 Hz header resonance. Its low band now sits within about 2 dB of the W24's.
+its note a hollow buzz on a 250-300 Hz header resonance. Its low band now sits within about 2 dB of the W24's and, against the real Veyron recordings (low end re body -2..+3 dB at idle and on the rev), at -2.5..+0.7 dB.
+
+**Combustion, crank speed and rattle** (`sound/combustion.rs`). The pipe model's cylinders know nothing of the burn, so the sound model
+now evaluates the engine model's own cylinder (polytropic compression and expansion, the Wiebe heat release, the same geometry, heat of
+combustion and efficiencies) into a table over the 720 degrees of the cycle, once per snapshot of the engine state. Two things use it.
+(1) *Torque.* A running engine's crank speed is the engine model's rpm plus what the combustion torque does to the crank (inertia, the idle
+control and the load pulling it back at about 1.5 Hz): the within-cycle ripple (about 3 % peak to peak on a four at idle, 1 % on a V8, 0.5 % on a
+W16) and, because every cylinder's burn scatters from cycle to cycle (more at idle), a slow wander of a few rpm that a perfectly steady idle does
+not have. The crank angle the whole sound model runs on carries it. (2) *Rattle.* How hard a combustion hits the block follows the peak rate of
+pressure rise the burn adds (bar per degree: 0.9 on a V8 at idle, 2.6 wide open, a diesel more), where it used to follow a fixed function of load;
+the old level is kept (petrol idle = 0.72) and the dependence on charge, spark advance and a misfire is now physical.
+
+**Turbo** (`sound/turbo.rs`). The compressor's shaft is its own state: it spools up in a tenth of a second on top of the engine model's lag and
+*runs down over a second or two* because on a lift the exhaust still turns it, so the whistle (a tone from 0.9 to 6.7 kHz that follows shaft speed,
+roughened by the flow pulses at the firing rate) glides down instead of vanishing. What the charge pressure does when the throttle closes is a
+tuning choice (`bov=stock|vent|none`, the "Blow-off valve" combo): a recirculating diverter gives a short soft hiss, a vented valve the loud "pssh" (about
+-10 dB under the engine), and with no valve the compressor surges: a train of chirps, each a tone sweeping up by a factor of 2.5 and down again over
+0.11 s, 3 to 10 a second while the trapped pressure bleeds away, with a thump each (the structure of the Celica recordings). Sound only: the dyno does not move.
+
+**Burble and pops.** Pops arrive in *bursts* (a two-state gate, a few tenths of a second on and off: the unburnt charge comes in pockets) and their
+strength is log-normal: most are a soft thump, a few are many times the median. Each pop also makes a *crack*, the shock that steepens in the pipe and
+leaves it with energy to 8 kHz in a few milliseconds; the solver cannot radiate that, so it is a separate transient, delayed by the exhaust path, scaled
+by what the cat and the muffler let through (42 dB of insertion loss on a stock exhaust: almost none, so a stock car burbles; with them gone it
+crackles) and sent around the loudness compressor and the limiter so that it stays a transient. Against the rally recordings (99.9th percentile of the
+1.5-8 kHz envelope 25-37 dB over its median; `tools/sound/hfcrest.py`) a deleted exhaust now reaches 25 dB and a stock one 11.
+
+**Coarse solver tiers.** The two coarsest tiers carry 1.5-2.5 dB more correction at 320-1300 Hz than the per-tier means ask for: in the finished mix a W24
+and a V8 on the 70 mm tier were still 2-5 dB under the 20 mm one at 200-1500 Hz, evenly over the speed range; they are now within 1-3 dB.
+
 
 The EXHAUST ACOUSTICS controls and the readouts under them show the live result: path length, the quarter-wave
 drone frequency of the pipe, the rpm the primaries tune to, gas temperature at the header and tip, the solver's
@@ -411,7 +439,8 @@ soundlab steady     --engine v8 --rpm 3000 --throttle 0.8 [--tune "..."] [--bank
 soundlab start      --engine i4      [--hold 2.4] [--cold]            # key turn: starter, hold-off, light-off, settle (WAV + spectrograms)
 soundlab off        --engine v8 [--hot] [--trace]                      # what a stopped engine still says (must be nothing)
 soundlab sweep      --engine v8 --from 900 --to 6400 --secs 12      # WAV + spectrogram of a rev
-soundlab lift       --engine v12 --from 5500 --to 2200               # overrun burble
+soundlab lift       --engine v12 --from 5500 --to 2200 [--tune "cat=delete,bov=none"]  # overrun: burble, blow-off, flutter
+soundlab ripple     --engine i4 [--rpm 800 --throttle 0]              # crank speed of a running engine: engine model against the sound model
 soundlab thermal    --engine v8 --rpm 3500                           # gas and wall temperature along the pipe
 soundlab resonances --engine v8 --rpm 4000                           # transfer-matrix resonances, and the rpm where each meets a firing harmonic
 soundlab compare    --engine v8 --rpm 3000 --ref recording.wav       # 1/3-octave, centroid and line comparison with a real recording
@@ -441,7 +470,7 @@ faults,learn,glossary,labels` opens those panels (without `--hideui`), `--tab cy
 `--cyl N`, `--scrub DEG` (turn the selected cylinder to that crank angle), `--lesson L:S` (start lesson L, 0-based, at
 step S, running the earlier steps' set-up too), `--hover X,Y` (pretend the pointer is there) and `--welcome`.
 
-`--tune "turbos=2,size=0.9,boost=1.0,filter=cold|open,runners=long|short|itb,header=shorty|long,cat=highflow|delete,muffler=sport|straight|delete,pipe=1.2,ic=none|large,pipemat=ti|ss304|ss409|steel|inconel,headermat=ti|ss304|ss409|steel|inconel|iron,wall=1.3,wrap=1,plen=0.8,pdia=1.1,mid=1.3,tail=1.5,cross=none|h|x"`
+`--tune "turbos=2,size=0.9,boost=1.0,filter=cold|open,runners=long|short|itb,header=shorty|long,cat=highflow|delete,muffler=sport|straight|delete,pipe=1.2,ic=none|large,bov=stock|vent|none,pipemat=ti|ss304|ss409|steel|inconel,headermat=ti|ss304|ss409|steel|inconel|iron,wall=1.3,wrap=1,plen=0.8,pdia=1.1,mid=1.3,tail=1.5,cross=none|h|x"`
 starts with those parts fitted (the same string works for `soundlab --tune`); `--tune-late "..."` swaps them in half way through the run, the way the
 TUNING panel does.
 

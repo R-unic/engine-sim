@@ -16,7 +16,9 @@
 //! That is a different engine sound on every tier - the heavy engines, which the auto policy puts on the coarse
 //! ones, lost their low end and the body of their note - and a step in the sound at every change of tier. The
 //! correction here is a small bank of peaking filters, one set of gains per tier, fitted to those means (what is
-//! left is the spread between engines, 1-3 dB below a kilohertz). Gains above a few kHz are not restored: what the
+//! left is the spread between engines, 1-3 dB below a kilohertz). The two coarsest tiers carry 1.5-2.5 dB more at 320-1300 Hz
+//! than the tierlab means ask for: in the finished mix (every source, a drive through the rev range) a W24 and a V8 on the 70 mm
+//! tier were still 2-5 dB under the 20 mm one at 200-1500 Hz, evenly over all speeds. Gains above a few kHz are not restored: what the
 //! grid has smeared out there it cannot be asked for, and the flow-noise layer supplies the top end anyway.
 
 use std::f32::consts::TAU;
@@ -30,8 +32,8 @@ const TABLE: [(f32, [f32; 6]); 5] = [
     (0.020, [0.0; 6]),
     (0.028, [0.1, 0.4, 0.2, 1.0, 0.9, 5.3]),
     (0.040, [0.4, 0.1, 0.5, 0.9, 3.5, 9.4]),
-    (0.055, [2.9, 1.9, 1.9, 6.4, 8.4, 10.6]),
-    (0.070, [2.7, 1.8, 1.6, 8.6, 7.8, 10.6]),
+    (0.055, [2.9, 1.9, 3.4, 8.9, 10.5, 12.0]),
+    (0.070, [2.7, 1.8, 3.1, 11.0, 10.3, 12.0]),
 ];
 
 /// The gains for a cell size: linear in the cell size between the tiers, held beyond them.

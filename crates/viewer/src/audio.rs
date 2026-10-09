@@ -614,7 +614,10 @@ mod tests {
         let shared = Arc::new(Mutex::new(AudioState::default()));
         let mut sim = Sim::new(shared.clone(), engine);
         let cfg = engine_by_id(engine).unwrap();
-        let mut snd = EngineSound::new(&cfg, &Tuning::default(), &engine_core::sound::default_banks(&cfg), quality);
+        // `DRIVE_TUNE="turbos=1,bov=none"` renders with parts fitted (the tuning spec of soundlab)
+        let tuning = std::env::var("DRIVE_TUNE").ok().map(|t| Tuning::parse_spec(&t).expect("bad DRIVE_TUNE")).unwrap_or_default();
+        sim.set_tuning(tuning.clone(), false);
+        let mut snd = EngineSound::new(&cfg, &tuning, &engine_core::sound::default_banks(&cfg), quality);
         let per_frame = (SAMPLE_RATE as f32 * FRAME) as usize;
         let (mut out, mut log) = (Vec::new(), Vec::new());
         let mut buf = vec![0.0f32; per_frame];
@@ -627,6 +630,9 @@ mod tests {
             snd.render(&mut buf);
             out.extend_from_slice(&buf);
             log.push((t, sim.tel.rpm as f32));
+            if std::env::var_os("DRIVE_DEBUG").is_some() && f % 30 == 0 {
+                eprintln!("t {t:5.1} rpm {:5.0} thr {:.2} spool {:.2} boost {:.2} gear {}", a.rpm, a.throttle, a.spool, a.boost, sim.gear_idx);
+            }
         }
         (out, log, snd.pops_fired)
     }
@@ -804,7 +810,7 @@ mod tests {
 
     /// Renders scripted drives through the live path (sim -> `sound_input` -> model) and writes them as WAVs for
     /// the spectral tools: `cargo test --release -p viewer render_drive_scenarios -- --ignored --nocapture`.
-    /// `DRIVE_ENGINES=v8,i4` picks the engines, `DRIVE_OUT` the folder, `DRIVE_QUALITY` the ladder level.
+    /// `DRIVE_ENGINES=v8,i4` picks the engines, `DRIVE_OUT` the folder, `DRIVE_QUALITY` the ladder level, `DRIVE_TUNE` the parts.
     #[test]
     #[ignore]
     fn render_drive_scenarios() {

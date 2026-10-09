@@ -32,7 +32,7 @@ const FLOOR_DB: [f32; 3] = [-3.0, -5.0, -6.5];
 /// idealisation to start with (sixteen near-identical firings leave only the firing harmonics, 250-400 Hz and up) and
 /// is the one that sounded thin and buzzy with a rumble no deeper than a six's. It grows from eight cylinders to sixteen,
 /// and from 40 % of it at idle to all of it from 2000 rpm (an idling W16 already has a lump to it).
-const MANY_CYLINDERS_DB: f32 = 5.0;
+const MANY_CYLINDERS_DB: f32 = 7.5;
 
 /// Lowest and highest frequency a partial is heard at, Hz (it fades in over the first and out over the last).
 const BAND: (f32, f32, f32, f32) = (28.0, 48.0, 140.0, 210.0);
