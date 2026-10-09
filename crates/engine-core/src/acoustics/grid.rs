@@ -449,6 +449,41 @@ impl Grid {
         }
     }
 
+    /// Gas and wall temperature of every cell of duct `d`, in order along the duct.
+    pub fn thermal_profile(&self, d: usize) -> (Vec<f32>, Vec<f32>) {
+        let (b, n) = (self.ducts[d].base, self.ducts[d].n);
+        (self.t[b..b + n].to_vec(), self.tw[b..b + n].to_vec())
+    }
+
+    /// Sets the temperatures of duct `d` from a profile taken on another grid (another cell size): the profile is
+    /// laid along the duct and read at each of this duct's cells (linearly in the position along it), keeping
+    /// pressure and velocity. A model that takes over from another is then as warm as it, cell for cell.
+    pub fn set_thermal_profile(&mut self, d: usize, gas: &[f32], wall: &[f32]) {
+        if gas.is_empty() || wall.is_empty() {
+            return;
+        }
+        let (b, n) = (self.ducts[d].base, self.ducts[d].n);
+        let at = |v: &[f32], i: usize| -> f32 {
+            let x = (i as f32 + 0.5) / n as f32 * v.len() as f32 - 0.5;
+            let i0 = x.floor().clamp(0.0, (v.len() - 1) as f32) as usize;
+            let i1 = (i0 + 1).min(v.len() - 1);
+            let f = (x - i0 as f32).clamp(0.0, 1.0);
+            v[i0] * (1.0 - f) + v[i1] * f
+        };
+        for i in 0..n {
+            let k = b + i;
+            let t = at(gas, i);
+            let rho = self.p[k] / (self.gas.r * t);
+            let u = self.u[k];
+            self.rho[k] = rho;
+            self.mom[k] = rho * u;
+            self.en[k] = rho * (self.gas.e(t) + 0.5 * u * u);
+            self.tw[k] = at(wall, i);
+        }
+        self.tw[b - 1] = self.tw[b];
+        self.tw[b + n] = self.tw[b + n - 1];
+    }
+
     /// Gas temperature of a duct's cells, keeping pressure and velocity.
     pub fn set_gas_temperature(&mut self, d: usize, t: f32) {
         let (b, n) = (self.ducts[d].base, self.ducts[d].n);

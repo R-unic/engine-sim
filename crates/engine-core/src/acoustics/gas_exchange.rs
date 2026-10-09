@@ -81,12 +81,24 @@ pub struct GasPath {
     /// comb, which no engine has.
     pub cyc_cov: f32,
     bias: Vec<f32>,
+    bias_sd: f32,
     rng: u32,
 }
 
 /// Standard deviation of a cylinder's own offset in blow-down mass, and how fast it wanders (per cycle).
 const CYL_BIAS_SD: f32 = 0.03;
 const CYL_BIAS_KEEP: f32 = 0.97;
+
+/// How uneven the cylinders of an engine with many of them are, 0 (eight or fewer) .. 1 (sixteen or more): more
+/// cylinders mean more runners, valves, injectors and combustion chambers that differ, and a longer, more irregular
+/// manifold. Without it a perfectly symmetric sixteen is a bare firing line and its overtones, a whine.
+pub fn irregularity(n: usize) -> f32 {
+    ((n as f32 - 8.0) / 8.0).clamp(0.0, 1.0)
+}
+
+/// Standard deviation (degrees of crank) of the fixed timing error of a cylinder of a fully irregular engine (valve lash
+/// and cam tolerances, ignition scatter).
+const TIMING_ERR_DEG: f32 = 0.8;
 
 /// Firing offsets (degrees) of each cylinder from the config's firing order.
 pub fn firing_offsets(cfg: &EngineConfig) -> Vec<f32> {
@@ -145,10 +157,13 @@ impl GasPath {
             last_pop_mult: 0.0,
             cyc_cov: 0.0,
             bias: vec![0.0; n],
+            bias_sd: CYL_BIAS_SD * (1.0 + 1.5 * irregularity(n)),
             rng: 0x9E37_79B9,
         };
         for i in 0..n {
-            gp.bias[i] = CYL_BIAS_SD * gp.randn();
+            gp.bias[i] = gp.bias_sd * gp.randn();
+            let err = TIMING_ERR_DEG * irregularity(n) * gp.randn();
+            gp.offsets[i] += err;
         }
         // the CFL rate of the pipes (which sets the first time step) is known from the start
         gp.exhaust.net.grid.update_primitives();
@@ -168,6 +183,30 @@ impl GasPath {
             s += (x >> 8) as f32 / 16_777_216.0;
         }
         s
+    }
+
+    /// Takes over the thermal state and the cylinders' personalities of `other`, a gas path of the same engine and parts
+    /// at another cell size: gas and wall temperature of every duct, the muffler chambers, each cylinder's own
+    /// offset. A model that replaces another mid-run then sounds like it (resonances follow the sound speed).
+    pub fn copy_state_from(&mut self, other: &GasPath) {
+        self.exhaust.copy_thermal_from(&other.exhaust);
+        if self.intake.net.grid.ducts.len() == other.intake.net.grid.ducts.len() {
+            for d in 0..self.intake.net.grid.ducts.len() {
+                let (g, w) = other.intake.net.grid.thermal_profile(d);
+                self.intake.net.grid.set_thermal_profile(d, &g, &w);
+            }
+        }
+        let n = self.cfg.cylinder_count;
+        let nc = self.exhaust.chambers.len().min(other.exhaust.chambers.len());
+        for k in 0..nc {
+            let t = other.res[n + k].t();
+            let r = &mut self.res[n + k];
+            r.energy = r.mass * r.gas.e(t);
+        }
+        if self.bias.len() == other.bias.len() {
+            self.bias.copy_from_slice(&other.bias);
+        }
+        self.pops_fired = other.pops_fired;
     }
 
     /// Local crank angle of cylinder `i`.
@@ -218,7 +257,7 @@ impl GasPath {
             if crossed {
                 // the charge burned: its fuel joins the gas and its temperature jumps; the mass the intake
                 // delivered stays, so pressure is whatever the gas law then says
-                let wander = CYL_BIAS_SD * (1.0 - CYL_BIAS_KEEP * CYL_BIAS_KEEP).sqrt();
+                let wander = self.bias_sd * (1.0 - CYL_BIAS_KEEP * CYL_BIAS_KEEP).sqrt();
                 self.bias[i] = CYL_BIAS_KEEP * self.bias[i] + wander * self.randn();
                 let scatter = (1.0 + self.cyc_cov * self.randn() + self.bias[i]).clamp(0.6, 1.4);
                 let mut mass = self.res[i].mass * (1.0 + self.fuel_frac[i]) * scatter;

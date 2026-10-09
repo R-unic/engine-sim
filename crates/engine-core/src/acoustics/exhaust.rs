@@ -304,7 +304,8 @@ impl ExhaustSystem {
         report.sides = sides;
         let mut side_src: Vec<Vec<usize>> = vec![Vec::new(); sides];
         for (i, &s) in streams.iter().enumerate() {
-            side_src[i % sides].push(s);
+            let side = if streams.len() >= 4 { i * sides / streams.len() } else { i % sides };
+            side_src[side].push(s);
         }
         let l_down = 0.42 * (1.0 + 0.1 * (tun.mid_len_scale as f32 - 1.0));
         let l_mid = 1.15 * tun.mid_len_scale as f32;
@@ -516,6 +517,17 @@ impl ExhaustSystem {
             let tg = t_amb + (egt_k - t_amb) * (-self.dist[d] / 3.5).exp();
             self.net.grid.fill(d, self.net.env.p_amb, tg);
             self.net.grid.set_wall_temperature(d, t_amb + 0.8 * (tg - t_amb));
+        }
+    }
+
+    /// Takes the gas and wall temperatures of `other`, an exhaust built from the same parts at another cell size.
+    pub fn copy_thermal_from(&mut self, other: &ExhaustSystem) {
+        if self.net.grid.ducts.len() != other.net.grid.ducts.len() {
+            return;
+        }
+        for d in 0..self.net.grid.ducts.len() {
+            let (g, w) = other.net.grid.thermal_profile(d);
+            self.net.grid.set_thermal_profile(d, &g, &w);
         }
     }
 
