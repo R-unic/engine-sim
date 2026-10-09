@@ -23,7 +23,10 @@ pub struct FloorMark {
     pub x0: f32,
 }
 
-fn f32_to_f16(v: f32) -> u16 {
+/// Height of the road (and the studio floor) in rig space, m.
+pub const FLOOR_Y: f32 = -0.56;
+
+pub fn f32_to_f16(v: f32) -> u16 {
     let b = v.to_bits();
     let sign = ((b >> 16) & 0x8000) as u16;
     let exp = ((b >> 23) & 0xff) as i32;
@@ -196,7 +199,7 @@ pub fn setup_scene(
     ));
 
     // floor
-    let floor_y = -0.56;
+    let floor_y = FLOOR_Y;
     commands.spawn((
         Mesh3d(meshes.add(Circle::new(100.0))),
         MeshMaterial3d(mats.floor.clone()),

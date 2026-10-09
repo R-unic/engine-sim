@@ -76,22 +76,12 @@ pub struct SpringC {
     pub intake: bool,
 }
 #[derive(Component)]
-#[allow(dead_code)]
 pub struct FlameC {
     pub ci: usize,
-    pub mat: Handle<StandardMaterial>,
-    pub crown_to_deck: f32,
     /// Brightness held (and decaying in fx time) after the burn so a ~20 ms flame stays visible.
     pub hold: f32,
     pub r_hold: f32,
     pub burn_prev: f32,
-}
-/// One bright lick on the expanding flame front.
-#[derive(Component)]
-pub struct Flamelet {
-    pub ci: usize,
-    pub k: usize,
-    pub mat: Handle<StandardMaterial>,
 }
 /// Jagged arc variants across the plug gap; one is shown per frame while the spark lasts.
 #[derive(Component)]
@@ -234,35 +224,26 @@ pub fn valve_system(
     }
 }
 
-fn flame_color(heat: f32) -> LinearRgba {
-    // deep orange -> yellow -> white-blue as it gets hotter/denser
-    let h = heat.clamp(0.0, 1.0);
-    let c = Vec3::new(1.0, 0.28 + 0.55 * h, 0.04 + 0.7 * h * h);
-    LinearRgba::rgb(c.x, c.y, c.z)
-}
-
 pub fn flame_system(
     sim: Res<Sim>,
     g: Option<Res<RigGeom>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut flames: ResMut<Assets<crate::chamber::ChamberFlameMaterial>>,
     mut glow: ResMut<crate::fx::FireGlow>,
-    mut q: Query<(&mut FlameC, &mut Transform, &mut Visibility)>,
-    mut lets: Query<(&Flamelet, &mut Transform, &mut Visibility), (Without<FlameC>, Without<SparkC>)>,
+    mut q: Query<(&mut FlameC, &mut Transform, &mut Visibility, Option<&crate::chamber::ChamberMat>)>,
     mut sparks: Query<(&mut SparkC, &mut Transform, &mut Visibility), Without<FlameC>>,
     time: Res<Time>,
 ) {
     let Some(g) = g else { return };
     let lay = &g.lay;
-    if sim.tables.len() != lay.n() {
+    if sim.tables.len() != lay.n() || std::env::var_os("NO_CHAMBER").is_some() {
         return;
     }
     let dt = time.delta_secs();
     let fx_dt = if sim.paused { 0.0 } else { dt * sim.time_scale };
     let tt = time.elapsed_secs();
     glow.0 = 0.0;
-    // per cylinder: (front radius, brightness, crown y, gap) while the flame front is alive
-    let mut front: Vec<Option<(f32, f32, f32, f32)>> = vec![None; lay.n()];
-    for (mut f, mut t, mut vis) in &mut q {
+    for (mut f, mut t, mut vis, mat) in &mut q {
         let th_deg = local_angle(&sim, f.ci);
         let table = &sim.tables[f.ci];
         let burn = table.burn_at(th_deg);
@@ -287,9 +268,6 @@ pub fn flame_system(
             f.hold = live;
             f.r_hold = if live > 0.0 { (0.5 * lay.bore * burn.clamp(0.0, 1.0).sqrt()).max(0.003) } else { 0.0 };
         }
-        let theta = th_deg.to_radians();
-        let crown = pin_dist(lay.r, lay.rod_len, theta) + lay.comp_h;
-        let gap = (lay.deck - crown).max(0.0006);
         if f.hold < 0.012 {
             *vis = Visibility::Hidden;
             continue;
@@ -297,39 +275,16 @@ pub fn flame_system(
         let hold = f.hold;
         glow.0 += hold;
         *vis = Visibility::Inherited;
+        // the volume hangs from the head: the gap between the head and the piston crown, at least a few mm thick
+        let theta = th_deg.to_radians();
+        let crown = pin_dist(lay.r, lay.rod_len, theta) + lay.comp_h;
+        let gap = (lay.deck - crown).max(0.006);
         let cg = &lay.cyls[f.ci];
-        t.translation = Vec3::new(cg.x, crown + gap * 0.5, 0.0);
-        t.scale = Vec3::new(f.r_hold, gap * 0.5, f.r_hold);
-        if let Some(mut m) = materials.get_mut(&f.mat) {
-            let e = 2.0 + 16.0 * hold;
-            let c = flame_color(0.0 + 0.45 * hold);
-            m.emissive = LinearRgba::rgb(c.red * e, c.green * e, c.blue * e);
+        t.translation = Vec3::new(cg.x, lay.deck - gap * 0.5, 0.0);
+        t.scale = Vec3::new(0.5 * lay.bore, gap * 0.5, 0.5 * lay.bore);
+        if let Some(mut m) = mat.and_then(|h| flames.get_mut(&h.0)) {
+            m.u.state = Vec4::new(f.r_hold, hold, tt, m.u.state.w);
         }
-        if burn < 0.995 || hold > 0.25 {
-            front[f.ci] = Some((f.r_hold, hold, crown, gap));
-        }
-    }
-    // bright flamelets riding the expanding front
-    for (fl, mut t, mut vis) in &mut lets {
-        let Some((r, h, crown, gap)) = front[fl.ci] else {
-            *vis = Visibility::Hidden;
-            continue;
-        };
-        if fl.k == 0 {
-            if let Some(mut m) = materials.get_mut(&fl.mat) {
-                let c = flame_color(0.7 + 0.3 * h);
-                let e = 25.0 + 45.0 * h;
-                m.emissive = LinearRgba::rgb(c.red * e, c.green * e, c.blue * e);
-            }
-        }
-        let seed = fl.ci as f32 * 0.37 + fl.k as f32 * 1.71;
-        let a = fl.k as f32 * TAU / 5.0 + 5.0 * crate::fx::hash01(tt * 17.0 + seed);
-        let rr = r * (0.6 + 0.4 * crate::fx::hash01(tt * 29.0 + seed * 3.0));
-        let y = crown + gap * (0.12 + 0.76 * crate::fx::hash01(tt * 23.0 + seed * 5.0));
-        let sz = (gap * 0.42).clamp(0.003, 0.02) * (0.6 + 0.8 * crate::fx::hash01(tt * 41.0 + seed * 7.0)) * h.sqrt();
-        *vis = Visibility::Inherited;
-        t.translation = Vec3::new(lay.cyls[fl.ci].x + rr * a.cos(), y, rr * a.sin());
-        t.scale = Vec3::splat(sz);
     }
     // Spark: flash when the recorded cycle table says ignition happened in the bins we just crossed.
     for (mut s, mut t, mut vis) in &mut sparks {
@@ -409,12 +364,15 @@ pub fn heat_glow_system(
     // Exhaust glow: ramps from invisible to dull cherry-red to orange with EGT and load.
     let egt = sim.tel.exhaust_gas_temp_k as f32;
     let heat = ((egt - 600.0) / 450.0).clamp(0.0, 1.0) * if sim.tel.is_running { 1.0 } else { 0.0 };
+    // a flame lit in the manifold shows through the pipe
+    let flash = sim.backfire_flash.iter().cloned().fold(0.0f32, f32::max);
     for g in &q {
         if let Some(mut m) = materials.get_mut(&g.mat) {
             let h = (heat * g.gain).clamp(0.0, 1.5);
             // black-body-ish ramp: dull red first, orange only when really hot
             let e = h * h * h * 2.4;
-            m.emissive = LinearRgba::rgb(1.0 * e, (0.03 + 0.10 * h) * e, 0.006 * e);
+            let f = flash * flash * 3.5 * g.gain.min(1.0);
+            m.emissive = LinearRgba::rgb(1.0 * e + 1.0 * f, (0.03 + 0.10 * h) * e + 0.5 * f, 0.006 * e + 0.12 * f);
         }
     }
 }

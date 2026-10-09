@@ -216,9 +216,9 @@ pub fn build_engine(cx: &mut Ctx, root: Entity, cfg: &EngineConfig, lay: &Layout
     let plug_ceramic = cx.mesh(MB::cylinder(0.0047, 0.0, 0.07, 16).rot_to_y());
     let coil_mesh = cx.mesh(MB::cuboid(0.034, 0.075, 0.034));
     let coil_cap = cx.mesh(MB::cuboid(0.036, 0.012, 0.036));
-    let flame_mesh = cx.mesh(MB::sphere(1.0, 20));
+    // the chamber's flame volume: a cube whose [-1, 1] range is the chamber (scaled to the bore and the gap each frame)
+    let flame_mesh = cx.mesh(MB::cuboid(2.0, 2.0, 2.0));
     let spark_mesh = cx.mesh(MB::sphere(0.0045, 8));
-    let flamelet_mesh = cx.mesh(MB::sphere(1.0, 8));
     // three jagged arc shapes from the centre electrode to the ground strap
     let bolt_meshes: Vec<Handle<Mesh>> = (0..3)
         .map(|v| {
@@ -295,32 +295,14 @@ pub fn build_engine(cx: &mut Ctx, root: Entity, cfg: &EngineConfig, lay: &Layout
         let s = cx.put(node, &sleeve_mesh, &sleeve_mat, Transform::from_xyz(x, lay.deck - sleeve_len, 0.0));
         cx.cmd.entity(s).insert(PressureTint { ci, mat: sleeve_mat });
 
-        // combustion glow volume
-        let flame_mat = cx.material(StandardMaterial {
-            base_color: Color::BLACK,
-            emissive: LinearRgba::BLACK,
-            alpha_mode: AlphaMode::Add,
-            unlit: false,
-            double_sided: true,
-            cull_mode: None,
-            ..default()
-        });
-        let f = cx.put(node, &flame_mesh, &flame_mat, Transform::from_xyz(x, lay.deck - 0.01, 0.0).with_scale(Vec3::splat(0.001)));
-        cx.cmd.entity(f).insert((
-            FlameC { ci, mat: flame_mat, crown_to_deck: 0.0, hold: 0.0, r_hold: 0.0, burn_prev: 0.0 },
+        // combustion volume (the material is attached by `chamber::attach_flame_materials`)
+        cx.cmd.spawn((
+            Mesh3d(flame_mesh.clone()),
+            Transform::from_xyz(x, lay.deck - 0.01, 0.0).with_scale(Vec3::splat(0.001)),
             Visibility::Hidden,
+            FlameC { ci, hold: 0.0, r_hold: 0.0, burn_prev: 0.0 },
+            ChildOf(node),
         ));
-        // bright licks riding the flame front
-        let front_mat = cx.material(StandardMaterial {
-            base_color: Color::BLACK,
-            emissive: LinearRgba::BLACK,
-            alpha_mode: AlphaMode::Add,
-            ..default()
-        });
-        for k in 0..5 {
-            let l = cx.put(node, &flamelet_mesh, &front_mat, Transform::from_xyz(x, lay.deck - 0.01, 0.0).with_scale(Vec3::splat(0.001)));
-            cx.cmd.entity(l).insert((Flamelet { ci, k, mat: front_mat.clone() }, Visibility::Hidden));
-        }
 
         // valves, springs, retainers, bridges
         for intake in [true, false] {

@@ -1,8 +1,10 @@
 mod audio;
+mod chamber;
 mod cam;
 mod cycle;
 mod dyno_bg;
 mod fx;
+mod gas;
 mod help;
 mod hud;
 mod labels;
@@ -16,6 +18,7 @@ mod scene;
 mod seethrough;
 mod sim;
 mod ui;
+mod volume;
 
 use bevy::app::AppExit;
 use bevy::prelude::*;
@@ -142,6 +145,9 @@ fn main() {
             ..default()
         }))
         .add_plugins(EguiPlugin::default())
+        .add_plugins(volume::VolumePlugin)
+        .add_plugins(chamber::ChamberPlugin)
+        .add_plugins(gas::GasPlugin)
         .init_resource::<ui::DynoTrace>()
         .init_resource::<hud::UiState>()
         .init_resource::<fx::FireGlow>()
@@ -164,6 +170,7 @@ fn main() {
                 sim_step,
                 dyno_bg::dyno_jobs_system,
                 rig::rig_system,
+                chamber::attach_flame_materials,
                 (
                     rig::anim::spin_system,
                     rig::anim::piston_system,
@@ -178,7 +185,7 @@ fn main() {
                     rig::anim::boost_glow_system,
                     rig::accessories::belt_mark_system,
                 ),
-                (fx::flow_system, puffs::puff_system, rig::anim::spark_bolt_system),
+                (volume::setup_plume, gas::gas_system, puffs::puff_system, volume::plume_system, rig::anim::spark_bolt_system),
                 fx::fire_light_system,
                 cam::camera_input,
                 cam::camera_update,

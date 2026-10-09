@@ -122,6 +122,9 @@ pub fn rig_system(
     }
     let cfg = sim.cfg().clone();
     let lay = Layout::plan(&cfg);
+    if std::env::var_os("RIG_LOG").is_some() {
+        eprintln!("RIG {} cylinders x = {:?}, deck {:.3}, bore {:.3}, tilts {:?}", cfg.id, lay.cyls.iter().map(|c| (c.x * 1000.0).round() / 1000.0).collect::<Vec<_>>(), lay.deck, lay.bore, lay.tilts);
+    }
     let root = commands.spawn((RigRoot, Transform::default(), Visibility::default())).id();
     let mut cx = Ctx { cmd: &mut commands, meshes: &mut meshes, materials: &mut materials, mats: &mats };
     let eb = engine_build::build_engine(&mut cx, root, &cfg, &lay);
@@ -141,7 +144,7 @@ pub fn rig_system(
     });
     {
         let mut cx2 = Ctx { cmd: &mut commands, meshes: &mut meshes, materials: &mut materials, mats: &mats };
-        crate::fx::build_fx(&mut cx2, root, &pl.intake_paths, &pl.exhaust_paths, pl.tail_tip, eb.x_mid, &puff_tex);
+        crate::fx::build_fx(&mut cx2, root, &pl.intake_paths, &pl.exhaust_paths, &pl.tail_tips, pl.tail_dir, pl.tail_r, eb.x_mid, &puff_tex);
     }
 
     let len = lay.x_rear - lay.x_front;

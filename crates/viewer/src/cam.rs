@@ -134,6 +134,10 @@ pub fn camera_update(
     for (mut tf, mut dof) in &mut q {
         *tf = Transform::from_translation(pos).looking_at(rig.target, Vec3::Y);
         dof.focal_distance = rig.dist;
+        // developer hook: `NO_DOF=1` closes the aperture, for judging effects without the blur
+        if std::env::var_os("NO_DOF").is_some() {
+            dof.aperture_f_stops = 64.0;
+        }
     }
 }
 

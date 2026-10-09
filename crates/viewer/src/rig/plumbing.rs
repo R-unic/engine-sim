@@ -21,6 +21,10 @@ pub struct PlumbingOut {
     pub intake_paths: Vec<Vec<Vec3>>,
     pub exhaust_paths: Vec<Vec<Vec3>>,
     pub tail_tip: Vec3,
+    /// Every tailpipe mouth (a sport muffler has two), the way they point and their radius.
+    pub tail_tips: Vec<Vec3>,
+    pub tail_dir: Vec3,
+    pub tail_r: f32,
     pub turbo_center: Option<Vec3>,
     pub intake_front: Vec3,
     pub muffler_center: Vec3,
@@ -795,6 +799,12 @@ pub fn build_plumbing(
     ];
     main_line.extend(spline(&tail, 5));
     let tail_tip = tip_c;
+    let tail_tips: Vec<Vec3> = if tuning.muffler == Muffler::Sport { [-1.0f32, 1.0].iter().map(|sz| tip_c + Vec3::new(0.0, 0.0, sz * 0.05)).collect() } else { vec![tip_c] };
+    let tail_dir = {
+        let d = (tip_c - Vec3::new(tail_start.x + 0.3, y + 0.03, z + 0.06)).normalize_or_zero();
+        if d.x > 0.5 { d } else { Vec3::X }
+    };
+    let tail_r_out = if tuning.muffler == Muffler::Sport { tail_r * 0.78 } else { tail_r * 1.1 };
     let mut exhaust_paths: Vec<Vec<Vec3>> = Vec::with_capacity(n);
     for i in 0..n {
         let mut p = runner_paths[i].clone();
@@ -808,6 +818,9 @@ pub fn build_plumbing(
         intake_paths,
         exhaust_paths,
         tail_tip,
+        tail_tips,
+        tail_dir,
+        tail_r: tail_r_out,
         turbo_center,
         intake_front,
         muffler_center: Vec3::new(d.x_muffler, y, z),
