@@ -8,7 +8,7 @@ stepping, per-angle combustion recording, synthesized engine audio and a PBR ren
 
 ```
 cargo run --release -p viewer                     # V8, default
-cargo run --release -p viewer -- --engine v8_50  # vtwin i4_16 i4 i4_25 v6_30 v6 i6_32 i6 i6_40 dieseli6 v8_50 v8 v12 v16 w16 w24
+cargo run --release -p viewer -- --engine v8_50  # vtwin i4_14 i4_16 i4 i4_25 v6_30 v6_35 v6 i6_32 i6 i6_40 dieseli6 v8_50 v8 v10_50 v10 v10_80 v12 v16 w16 w24
 cargo test --release -p engine-core               # physics regression + dyno + ECU/EVAP + acoustics validation
 cargo test --release -p viewer                    # live sound path tests (every engine starts, idles on its firing note...)
 cargo run --release -p engine-core --example soundlab -- steady --engine v8 --rpm 3000   # sound lab (see Audio)
@@ -326,9 +326,11 @@ level within a tenth of a second of the last firing (`Mechanical::fire`), and no
 for as long as the wheels kept the crank turning, 25 dB under the running engine and lifted by the loudness compressor;
 now it is 40 dB under it and a coast of 12 s decays to inaudible (`an_engine_that_is_switched_off_but_still_turning_is_nearly_silent`).
 
-**Gas level.** The valve jets and the engine noise are 6 dB and 3 dB below the level the recordings gave (`JET_GAIN` 0.25,
-`ENGINE_NOISE_PA` 0.017): through the loudness compressor the engine as a whole is as loud as before, but the airy 1.5-10 kHz share
-of it (the part that reads as gas moving) is down 2.5-3.5 dB and the note stands out of it more.
+**Gas level.** The valve jets and the engine noise sit well below the level the recordings gave (`JET_GAIN` 0.12, `ENGINE_NOISE_PA` 0.011, both
+shaped to 4.5 kHz instead of 6, the valve ticks 3.5 dB down; engines with more than eight cylinders get another 1.5-4.4 dB off both, because the
+balanced exhaust of a W16 makes the quietest note under the same hash). Through the loudness compressor the engine as a whole is as loud as
+before, but in a drive through the rev range the 4-10 kHz share is 6-9 dB down on the recording-matched level and 1.5-4 kHz 3-5 dB down: the airy hiss
+that read as gas moving is gone and the note stands out of it. The pipe radiation has two 4th-order low-passes at 2.8 kHz (48 dB per octave).
 
 **Hiss at high rpm.** The valve-jet and engine-noise levels were calibrated on a car revving in neutral; held for half a
 minute at 5500 rpm in a high gear they sat at the loud edge of what the recordings allow and stood out of the note. Past 2500 rpm the
@@ -358,18 +360,16 @@ pressure rise the burn adds (bar per degree: 0.9 on a V8 at idle, 2.6 wide open,
 the old level is kept (petrol idle = 0.72) and the dependence on charge, spark advance and a misfire is now physical.
 
 **Turbo** (`sound/turbo.rs`). The compressor's shaft is its own state: it spools up in a tenth of a second on top of the engine model's lag and
-*runs down over a second or two* because on a lift the exhaust still turns it, so the whistle (a tone from 0.9 to 6.7 kHz that follows shaft speed,
-roughened by the flow pulses at the firing rate) glides down instead of vanishing. What the charge pressure does when the throttle closes is a
+*runs down over a second or two* (it keeps its momentum), so the whistle (a tone from 0.9 to 6.7 kHz that follows shaft speed,
+roughened by the flow pulses at the firing rate) glides down instead of vanishing. An engine without a turbo reports no spool and makes no whistle (`an_engine_without_a_turbo_never_whistles`). What the charge pressure does when the throttle closes is a
 tuning choice (`bov=stock|vent|none`, the "Blow-off valve" combo): a recirculating diverter gives a short soft hiss, a vented valve the loud "pssh" (about
 -10 dB under the engine), and with no valve the compressor surges: a train of chirps, each a tone sweeping up by a factor of 2.5 and down again over
 0.11 s, 3 to 10 a second while the trapped pressure bleeds away, with a thump each (the structure of the Celica recordings). Sound only: the dyno does not move.
 
-**Burble and pops.** Pops arrive in *bursts* (a two-state gate, a few tenths of a second on and off: the unburnt charge comes in pockets) and their
-strength is log-normal: most are a soft thump, a few are many times the median. Each pop also makes a *crack*, the shock that steepens in the pipe and
-leaves it with energy to 8 kHz in a few milliseconds; the solver cannot radiate that, so it is a separate transient, delayed by the exhaust path, scaled
-by what the cat and the muffler let through (42 dB of insertion loss on a stock exhaust: almost none, so a stock car burbles; with them gone it
-crackles) and sent around the loudness compressor and the limiter so that it stays a transient. Against the rally recordings (99.9th percentile of the
-1.5-8 kHz envelope 25-37 dB over its median; `tools/sound/hfcrest.py`) a deleted exhaust now reaches 25 dB and a stock one 11.
+**Burble and pops.** The pops are real blow-downs: a cylinder holding unburnt charge lights at its exhaust valve and the pipe model radiates it,
+so a burble is low and round. (A version with bursts, a heavy-tailed strength and a separate high-frequency "crack" layer, scaled to the rally
+recordings, was tried and sounded like a train of clicks; it was removed. `burble_is_low_and_round_not_a_click` keeps the high-passed envelope of an
+overrun under 18 dB over its median, where the rally recordings reach 25-37.)
 
 **Coarse solver tiers.** The two coarsest tiers carry 1.5-2.5 dB more correction at 320-1300 Hz than the per-tier means ask for: in the finished mix a W24
 and a V8 on the 70 mm tier were still 2-5 dB under the 20 mm one at 200-1500 Hz, evenly over the speed range; they are now within 1-3 dB.

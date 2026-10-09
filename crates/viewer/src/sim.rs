@@ -127,6 +127,7 @@ const IGNITION_HOLDOFF_S: f64 = 1.1;
 fn burble_amount(id: &str) -> f32 {
     match engine_core::layout_of(id) {
         "v12" => 1.0,
+        "v10" => 0.9,
         "v16" => 0.9,
         "w16" | "w24" => 0.8,
         "v8" => 0.6,

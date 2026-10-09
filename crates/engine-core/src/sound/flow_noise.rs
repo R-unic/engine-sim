@@ -222,7 +222,7 @@ impl Envelope {
 
 /// Calibration of the jets' acoustic power against recordings (see the module notes): the literature efficiency
 /// is only good to a factor of a few.
-const JET_GAIN: f32 = 0.25;
+const JET_GAIN: f32 = 0.12;
 
 /// The exhaust and the intake flow-noise sources of one engine.
 #[derive(Clone, Debug)]
@@ -236,6 +236,8 @@ pub struct FlowLayer {
     delay_x: usize,
     delay_i: usize,
     w: (f32, f32),
+    /// Scale on the jets' power (see `set_hash_scale`).
+    scale: f32,
 }
 
 impl FlowLayer {
@@ -246,8 +248,8 @@ impl FlowLayer {
         let (loss_x, loss_i) = (exhaust_loss_db(tuning) + if turbine { 6.0 } else { 0.0 }, intake_loss_db(tuning));
         // what is left after a lot of insertion loss is darker: the knee of the jet spectrum slides down
         let knee = |loss: f32| (1_500.0 - 14.0 * loss).clamp(700.0, 1_500.0);
-        let mut shp_x = Shaper::new(0x6D2B_79F5, fs, 700.0, knee(loss_x), 6_000.0);
-        let mut shp_i = Shaper::new(0x1B87_3593, fs, 600.0, knee(loss_i), 6_000.0);
+        let mut shp_x = Shaper::new(0x6D2B_79F5, fs, 700.0, knee(loss_x), 4_500.0);
+        let mut shp_i = Shaper::new(0x1B87_3593, fs, 600.0, knee(loss_i), 4_500.0);
         shp_x.normalise();
         shp_i.normalise();
         FlowLayer {
@@ -260,7 +262,14 @@ impl FlowLayer {
             delay_x: (path_m / gas_c.max(250.0) * fs) as usize,
             delay_i: (0.004 * fs) as usize,
             w: (0.0, 0.0),
+            scale: 1.0,
         }
+    }
+
+    /// Scales the jets' acoustic power (an amplitude ratio squared is applied): the engines with many cylinders have the
+    /// quietest note (their balanced pulses cancel the low orders) under the same hash, which then stands out of it.
+    pub fn set_hash_scale(&mut self, amplitude_ratio: f32) {
+        self.scale = amplitude_ratio * amplitude_ratio;
     }
 
     /// Delay of the exhaust path from valve to mouth, in audio samples, and what the fitted cat and muffler let through of a
@@ -293,8 +302,8 @@ impl FlowLayer {
         // steady pull in a high gear keeps them there: the hiss would stand out of the note it sits on. Past
         // 2500 rpm the share they take falls by 6 dB (exhaust) and 3 dB (intake) toward 5500.
         let hi = super::mechanical::smoothstep(2_500.0, 5_500.0, rpm);
-        let wx = self.env_x.step(self.w.0 * JET_GAIN * (1.0 - 0.75 * hi), self.delay_x);
-        let wi = self.env_i.step(self.w.1 * JET_GAIN * (1.0 - 0.5 * hi), self.delay_i);
+        let wx = self.env_x.step(self.w.0 * JET_GAIN * self.scale * (1.0 - 0.75 * hi), self.delay_x);
+        let wi = self.env_i.step(self.w.1 * JET_GAIN * self.scale * (1.0 - 0.5 * hi), self.delay_i);
         let open = throttle_open.clamp(0.0, 1.0);
         (self.shp_x.step(pressure_at(wx, r) * self.att_x), self.shp_i.step(pressure_at(wi, ri) * self.att_i * open * open))
     }

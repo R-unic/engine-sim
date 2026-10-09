@@ -8,7 +8,7 @@ use crate::tuning::BlowOff;
 
 /// Pressure (rms, Pa, at the listener) of the broadband engine noise at 1000 rpm and full load: calibrated against
 /// recordings of idling and revving cars (`README`, Audio).
-const ENGINE_NOISE_PA: f32 = 0.017;
+const ENGINE_NOISE_PA: f32 = 0.011;
 
 /// Structural modes of the block that a combustion thud rings: (Hz, damping ratio, weight). A block has hundreds of
 /// them, closely spaced and well damped, so what reaches the ear is a smooth, dull thud; three sharp modes (the first
@@ -24,6 +24,7 @@ const BLOCK_RISE_GAIN: f32 = 7.5;
 const DIESEL_RISE_HZ: f32 = 1_000.0;
 const DIESEL_UPPER_MODES: f32 = 0.2;
 const DIESEL_CLATTER_LP_HZ: f32 = 1_600.0;
+const PETROL_RATTLE_LP_HZ: f32 = 3_200.0;
 const DIESEL_CLATTER: f32 = 0.026;
 
 /// Share of the engine noise that is left when nothing burns (valve train, bearings, gears, belts only).
@@ -154,6 +155,8 @@ pub struct Mechanical {
     tick_gain: f32,
     /// Broadband engine noise (combustion, bearings, gears, drive, injectors): stationary, as recordings of real engines show.
     engine_noise: Shaper,
+    /// Scale on the broadband engine noise (many-cylinder engines, see `set_hash_scale`).
+    noise_scale: f32,
     /// 1 while the engine fires, falling away when it stops.
     fire: f32,
     // the gear mesh is not perfectly steady: drift and flutter
@@ -182,8 +185,9 @@ impl Mechanical {
             tick_env: 0.0,
             tick_gain: 1.0,
             fire: 0.0,
+            noise_scale: 1.0,
             engine_noise: {
-                let mut s = Shaper::new(0x2F6B_91A7, fs, 450.0, 1_800.0, 6_500.0);
+                let mut s = Shaper::new(0x2F6B_91A7, fs, 450.0, 1_800.0, 4_500.0);
                 s.normalise();
                 s
             },
@@ -191,6 +195,11 @@ impl Mechanical {
             gear_am: Wander::new(9.0, fs),
             rng2: Noise::new(0x7A31_C5E3),
         }
+    }
+
+    /// Scale on the broadband engine noise.
+    pub fn set_hash_scale(&mut self, amplitude_ratio: f32) {
+        self.noise_scale = amplitude_ratio;
     }
 
     /// Shaft speed of the turbo, 0..1 (analysis).
@@ -230,11 +239,13 @@ impl Mechanical {
             let w = if c.diesel && m.0 > 1_800.0 { DIESEL_UPPER_MODES } else { 1.0 };
             s += r.step(rise * m.2 * w);
         }
-        if c.diesel {
+        {
             // a two-pole resonator passes its input straight through above its own frequency, so the sharp rise
-            // would click through unchanged; the clatter is the modes' ring, not that edge
+            // would click through unchanged (a diesel's clatter to 5 kHz; a V-twin's sparse thuds a tick to 10 kHz, which
+            // read as high-frequency clicks): the rattle is the modes' ring, not that edge
+            let hz = if c.diesel { DIESEL_CLATTER_LP_HZ } else { PETROL_RATTLE_LP_HZ };
             for lp in self.diesel_lp.iter_mut() {
-                *lp += (s - *lp) * (1.0 - (-tau * DIESEL_CLATTER_LP_HZ * dt).exp());
+                *lp += (s - *lp) * (1.0 - (-tau * hz * dt).exp());
                 s = *lp;
             }
         }
@@ -253,7 +264,7 @@ impl Mechanical {
         self.tick_env *= (-dt / 0.0008).exp();
         let tick = self.head.step(n * self.tick_env * 0.05);
         self.valve_lp += (tick - self.valve_lp) * (1.0 - (-tau * 2600.0 * dt).exp());
-        out += self.valve_lp * 0.03;
+        out += self.valve_lp * 0.02;
 
         // ---- engine noise: combustion, bearings, gears, chain and belts, injectors and the rest add up to a broadband
         // noise (recordings: stationary, envelope rms/mean ~0.55, with only a few percent of modulation at the firing
@@ -268,7 +279,7 @@ impl Mechanical {
         // not hiss
         let hi_rpm = smoothstep(2_500.0, 5_500.0, c.rpm);
         let load = (0.7 + 0.3 * c.load.clamp(0.0, 1.2)) * (MOTORING + (1.0 - MOTORING) * self.fire) * (1.0 - 0.3 * hi_rpm);
-        out += self.engine_noise.step(ENGINE_NOISE_PA * speed.powf(1.1) * load * if c.diesel { 1.6 } else { 1.0 });
+        out += self.engine_noise.step(ENGINE_NOISE_PA * self.noise_scale * speed.powf(1.1) * load * if c.diesel { 1.6 } else { 1.0 });
 
         // ---- knock (detonation ping)
         if c.knock > 0.05 {

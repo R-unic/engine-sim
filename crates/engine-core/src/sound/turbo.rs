@@ -9,7 +9,7 @@
 //! boost.
 //!
 //! The shaft is a heavy little rotor: it takes a few tenths of a second to spool up under the exhaust gas (the engine
-//! model's own spool lag comes on top) and a second or two to run down, because on a lift the exhaust still turns it. The
+//! model's own spool lag comes on top) and a second or two to run down, because it keeps its momentum on a lift. The
 //! whistle's pitch follows that shaft speed, not the throttle, so on a lift it glides down slowly instead of vanishing.
 
 use super::mechanical::{Noise, Res, Wander};
@@ -140,8 +140,9 @@ impl Turbo {
 
         // ---- the shaft: spools up in a few tenths of a second, runs down over a second or two. With the throttle shut the
         // exhaust gas still turns it at a fraction of its speed under load.
-        let coast = 0.06 + 0.14 * c.rpm_frac.clamp(0.0, 1.0);
-        let target = if c.combusting { coast + (1.0 - coast) * c.spool.clamp(0.0, 1.0) } else { 0.0 };
+        // (the shaft speed is the spool the engine model reports and what is left of it as it runs down: an engine without a turbo
+        // reports none, and there is nothing here to whistle. A floor of "coasting" speed made every naturally aspirated engine whistle.)
+        let target = if c.combusting { c.spool.clamp(0.0, 1.0) } else { 0.0 };
         let t_shaft = if target > self.ns { 0.10 } else { 1.6 };
         self.ns += (target - self.ns) * (1.0 - (-dt / t_shaft).exp());
         self.on += ((c.combusting as u8 as f32) - self.on) * (1.0 - (-dt / 0.05).exp());
@@ -189,6 +190,7 @@ impl Turbo {
             flutter_am = 1.0 - 0.75 * (std::f32::consts::PI * x).sin().powi(2);
         }
         if sp > 0.04 && self.on > 0.01 {
+            let _ = c.rpm_frac;
             let f1 = Self::whistle_hz(sp) * (1.0 + 0.010 * self.fm.step(n2));
             let flutter = (1.0 + 0.3 * self.am.step(self.rng2.next())).max(0.25);
             self.phase1 = (self.phase1 + f1 * dt).fract();
@@ -308,6 +310,17 @@ mod tests {
         println!("rms on boost {:.4}, off {:.5}", rms(&on[44_100..]), rms(&idle[44_100..]));
         assert!(rms(&on[44_100..]) > 10.0 * rms(&idle[44_100..]));
         assert!(Turbo::whistle_hz(1.0) > Turbo::whistle_hz(0.5) && Turbo::whistle_hz(0.5) > Turbo::whistle_hz(0.1));
+    }
+
+    #[test]
+    fn an_engine_without_a_turbo_never_whistles() {
+        // spool 0 and boost 0 at every throttle and speed: silence (a floor of coasting shaft speed once made every NA engine whistle)
+        let mut t = Turbo::new(44_100.0);
+        for (thr, rpm) in [(0.0, 0.15), (0.5, 0.4), (1.0, 0.9)] {
+            let c = TurboCtx { rpm_frac: rpm, ..ctx(0.0, thr, 0.0, BlowOff::Recirculating) };
+            let x: Vec<f32> = (0..88_200).map(|_| t.step(&c)).collect();
+            assert!(rms(&x[44_100..]) < 1.0e-4, "throttle {thr}: a naturally aspirated engine whistles ({:.5})", rms(&x[44_100..]));
+        }
     }
 
     #[test]
