@@ -8,7 +8,7 @@ stepping, per-angle combustion recording, synthesized engine audio and a PBR ren
 
 ```
 cargo run --release -p viewer                     # V8, default
-cargo run --release -p viewer -- --engine i4turbo # v8 vtwin v6 v12 v16 i6 i4 i4turbo w16 w24 dieseli6
+cargo run --release -p viewer -- --engine v8_50  # vtwin i4_16 i4 i4_25 v6_30 v6 i6_32 i6 i6_40 dieseli6 v8_50 v8 v12 v16 w16 w24
 cargo test --release -p engine-core               # physics regression + dyno + ECU/EVAP + acoustics validation
 cargo test --release -p viewer                    # live sound path tests (every engine starts, idles on its firing note...)
 cargo run --release -p engine-core --example soundlab -- steady --engine v8 --rpm 3000   # sound lab (see Audio)
@@ -25,8 +25,8 @@ cargo run --release -p engine-core --example soundlab -- steady --engine v8 --rp
 `crates/engine-core/reference/`, an artifact scanner; see the Audio section and its README).
 
 The physics is a faithful port of the TypeScript sim (same constants, same structure) and is
-validated against it: the V8 lands within 2% of a real LS3's 430 hp, the 1.4 L turbo I4 at 152 hp,
-all 11 engines idle and rev (`crates/engine-core/tests`).
+validated against it: the 6.2 L V8 lands within 2% of a real LS3's 430 hp,
+all 16 engines idle and rev (`crates/engine-core/tests`).
 
 ## Controls
 
@@ -94,8 +94,9 @@ sim for a physical reason *and* the 3D rig, which rebuilds around it (sliders re
 | Boost | 0.2-2.2 bar wastegate | manifold pressure, charge heating, knock and EGT |
 | Intercooler | none, stock, large front-mount | charge temperature: density and knock margin |
 
-Stock turbo engines keep their stock hardware (the W16 has its four turbos, the V6 its two); an
-untouched `Tuning` reproduces the reference dyno figures exactly (`stock_tuning_is_exactly_the_stock_engine`).
+No engine ships with a turbo: every preset is naturally aspirated (several sizes per layout, e.g. the flat-plane 5.0 L V8 in
+the style of the Jesko's, or the 6.2 L cross-plane one) and you bolt turbos on here; a diesel gets a sensible default turbo the
+same way. An untouched `Tuning` reproduces the reference dyno figures exactly (`stock_tuning_is_exactly_the_stock_engine`).
 Presets: Stock / Street / Sport / Turbo kit / Race. More boost needs more octane: the HUD flags KNOCK, so
 swap to E85 or Race 100 in the ENGINE SIM panel.
 
@@ -108,8 +109,8 @@ sweep (`dyno_curve`) a moment after any change and overlays it on the stock curv
 
 Turbos are laid out in two mirrored columns at the front of the engine (compressors face outward so each
 has room for its own filter), stacked in tiers for three or four, and fed from the collector that
-actually sits next to them. Per cylinder gas-flow particles follow the real runner -> collector -> turbine
--> downpipe -> cat -> muffler path of whichever parts are fitted.
+actually sits next to them. Per cylinder, parcels of gas follow the real runner -> collector -> turbine
+-> downpipe -> cat -> muffler path of whichever parts are fitted (see "Visible processes").
 
 ## How it stays readable at 6,000 rpm
 
@@ -138,11 +139,39 @@ what is in the way, and those parts (plus the small parts touching them, e.g. a 
 get their own translucent copy of their material, solidifying again when the view clears. Toggle it in the
 ENGINE SIM panel or start with `--no-seethrough`.
 
-Visible processes: a spark arc at each plug, port-injector fuel spray (diesel: in-chamber plume), a
-flame front that spreads from the plug across the chamber (persisting a few frames so a ~20 ms burn is
-visible), exhaust-valve blowdown puffs, manifold flash and tailpipe fireballs with embers and soot on
-backfire / decel crackle, and a continuous exhaust plume (white vapour cold, black soot when rich).
-Billboard particles live in `viewer/src/puffs.rs` and age in time-scaled time, so slow-mo stretches them.
+Visible processes: a spark arc at each plug, port-injector fuel spray (diesel: in-chamber plume), a turbulent
+flame front that spreads from the plug across each chamber, the gas moving through the intake and the exhaust, and
+everything that leaves the tailpipe: haze, steam, soot and the fire of a backfire. They are not sprites:
+
+- *Tailpipe plume* (`volume.rs`, `plume.wgsl`). A few hundred Gaussian *blobs* carry the physics: thrown out of the
+  pipe a puff per exhaust-valve opening (more of them the faster it flows, so they overlap into a jet), slowed by drag
+  against the air and the car's own airflow, lifted by their heat, stirred by a divergence-free swirl, grown by
+  entrainment, cooled by mixing, thinned as the steam re-evaporates. Every frame they are splatted (mass-conserving
+  Gaussian kernels, stretched along their velocity) into a 3D texture of haze, soot and flame emission, and a ray
+  marcher integrates it along each camera ray: the haze scatters the key and fill lights and shadows itself, soot
+  absorbs, flames emit with the colour of a black body at their temperature (1850-2350 K at birth, cooling as they
+  burn out) and light the smoke around them; fine turbulent structure is added from moving noise; the volume writes
+  its own depth so depth of field does not blur it as if it were the wall behind it. What shows follows the engine:
+  a trace of haze when warm, steam when the exhaust is cold, black smoke when rich or a diesel under load; the
+  car's speed streaks the plume out.
+- *Backfire and pops*. The charge lights at the mouth and the flame front runs out along the plume, so the fire is seen
+  to leave the pipe: a fireball plus 16-26 tongues of flame (each lit a few ms after the one before it, each a
+  streak along its own velocity, solid while young, breaking into sheets as it burns out), the smoke the burn leaves,
+  burning droplets that streak across the frame as a shutter would see them (`puffs.rs`), a flash of tail light and a
+  flash of the manifold glowing through its pipes. Diesels do not pop.
+- *Flame in the chamber* (`chamber.rs`, `chamber_flame.wgsl`). The chamber volume is ray-marched too: a spark kernel
+  becomes a wrinkled flame front (a thin white-yellow sheet with a blue skin) with the burned gas glowing behind it
+  as a black body, pushed about by turbulence that moves with time, growing with the burned fraction the engine
+  model recorded for that crank angle.
+- *Gas in the pipes* (`gas.rs`, `gas.wgsl`). Parcels of gas follow each runner and pipe centre line - fresh charge, pale
+  blue, in through every intake valve while it is open; burned gas out of every exhaust valve at its opening, glowing
+  while it is hot and fading to grey as the pipe cools it - as soft Gaussian blobs (a camera-facing quad with a
+  Gaussian falloff is the exact line integral of a spherical Gaussian volume), stretched along the flow and stirred
+  sideways by swirl that grows downstream. All of them are one dynamic mesh and one draw call.
+
+Everything ages in time-scaled time, so slow-mo stretches it. Developer hooks for judging it in screenshots:
+`FX_TEST=backfire|pop` (with `FX_TEST_AT=seconds`) fires one on a timer, `FX_SLOW=0.04` runs only the fx clock slowly,
+`NO_DOF=1` closes the aperture, `NO_PLUME=1`, `NO_GAS=1`, `NO_PUFF=1` and `NO_CHAMBER=1` switch one effect off, `PLUME_LOG=1` and `RIG_LOG=1` print the plume state and the cylinder positions.
 
 ## Layout is derived, not invented
 
@@ -216,6 +245,16 @@ climbs steeply with load. Three sources make it here:
   (7 % at idle, 2 % under load) plus its own slowly wandering offset, so the exhaust pulses are never exact copies and
   the harmonic comb is not razor sharp. Pure sines are gone from the machinery as well: the turbo whistle and the gear mesh
   wander in frequency and flutter in level (the gear tone has the shaft-rate sidebands of a real mesh).
+- *Combustion rattle.* Every combustion thud rings a bank of six well damped block modes (520 Hz - 2.9 kHz): a block has
+  hundreds of closely spaced modes, so what reaches the ear is a dull thud and not a tone (three sharp modes made a nasal
+  640 Hz line that sat in every engine at every speed). The thuds scatter in strength (+-40 %) and in time (1.5 degrees rms)
+  so the firing harmonics near a mode do not stand as clean tones. A diesel uses the same bank with a quicker rise, mostly the modes
+  below 1.8 kHz and a bigger scatter (strength 0.5-1.5, timing 2.4 degrees rms: no two injections ignite alike); its first version fed three
+  sharp modes with a regular pulse and was a nasal 640 Hz buzz at the firing rate with a tick train out to 5 kHz.
+- *Many cylinders are never perfectly even.* From eight to sixteen cylinders (`gas_exchange::irregularity`) each cylinder's
+  blow-down strength scatters up to 2.5x as much and carries a fixed timing error of up to 0.8 degrees (valve lash,
+  cam tolerance, ignition): a perfectly symmetric sixteen is a bare firing line and its overtones, a whine. A W16 sends
+  its first two banks (one VR8) down one side of the exhaust and the other two down the other.
 
 The efficiency of the jets, the losses of the parts and the level of the engine noise are estimates calibrated against
 the recordings below (for a stock car the jet efficiency and the stock losses trade against each other; the rasp of a
@@ -229,18 +268,31 @@ note (the solver is heard up to 2.8 kHz; above that the valve-jet layer is the s
 -6 on 28 mm cells and -18 on 50 mm, at 1.6 kHz -9 and -28, at 2 kHz -13 and -29; pitch and the low end are identical on
 all of them. Overall (dB(A) at 1.5 m) 94.8 / 93.3 / 92.5 / 87.7 / 85.8 from ultra to eco.
 
-*Auto* (`AutoQuality` in `viewer/src/audio.rs`) starts every engine on balanced, watches the fraction of real time
-the worker spends rendering, and moves to the finest tier that keeps that near 40 %: it steps coarser (several
-tiers at once if need be) when the load stays above 75 % for a second, finer when it stays below 28 % for a few seconds
-(a tier costs about 1.6x the next coarser one), never back into a tier that has just overloaded for the next three
-minutes. A switch (and a part fitted in the TUNING panel) does not drop the sound out and bring a cold model in: the
-replacement is built beside the current one, started from its crank angle, speed glide and compressor state, runs in step
-with it for 0.25 s while its pipes settle and is cross-faded in over 40 ms (a cold model dropped in place was a 40 ms
-dropout followed by a +4 dB surge). If the audio device ever outruns the worker the output does not cut to zero (two
+**The tiers sound alike.** A tier change used to be a different engine (V8, 3500 rpm, tailpipe monopole against the finest
+tier, mean over engines and speeds, `examples/tierlab.rs`): 40 mm cells -0.5 dB at 250 Hz, -4.7 at 1 kHz, -11 at 1.6 kHz;
+55 mm cells -4 dB of *low end* (100-250 Hz), -8 at 500 Hz and -13 at 1 kHz. The heavy engines, which the auto policy
+puts on the coarse tiers, therefore lost their low end and the body of the note, and every change of tier was a step in
+the sound. A small bank of peaking filters per tier (`sound/tier_eq.rs`, gains fitted to those means and interpolated by
+cell size) puts back what the grid smooths away: after it every tier is within about 1 dB of the finest below 1 kHz,
+whatever the engine (the spread between engines is 1-3 dB; the test `the_tiers_of_the_solver_sound_alike` pins
+it), and what the coarse grids cannot give above 1.5 kHz (up to -14 dB on the coarsest) is where the valve-jet layer
+takes over anyway.
+
+*Auto* (`AutoQuality` in `viewer/src/audio.rs`) chooses once and then keeps still. When an engine is selected a
+throw-away model renders a third of a second at a hard working point (0.7 of the redline, nearly wide open) and the
+tier is the finest whose predicted cost (a tier costs about 1.45x the next coarser one) stays under 50 % of a core (the benchmark is a hard working point; live, the same tier takes about 0.6 of it):
+room for a hard pull and for the second model that runs beside the first during a hand-over. After that it changes only
+when it must: a load above 80 % for 1.2 s steps down at once (several tiers if need be, to the one that would bring it to half a core);
+a load under 20 % for 20 s, at least 45 s after the last change, steps up by one tier; never back into a tier that
+has just overloaded for five minutes. A switch (and a part fitted in the TUNING panel) does not drop the sound out and bring a cold model in: the
+replacement is built beside the current one and takes over its crank angle, speed glide, compressor and limiter state,
+its cylinders' own offsets and *its thermal state, duct by duct and cell by cell* (a model that starts at its own idea of
+the pipe temperatures has other resonances: the old swap of an i6 to the finest tier dropped the 30-200 Hz band by 7 dB),
+and its noise generators, so the hiss and the rasp of both are the same sample for sample and cross-fade as one
+signal instead of dipping 3 dB in the middle as two uncorrelated ones do; it runs in step for 0.25 s while its pipes
+settle and is cross-faded in over 0.2 s. If the audio device ever outruns the worker the output does not cut to zero (two
 clicks) but holds the last sample and fades back to the signal over 4 ms. A fixed tier can be
-pinned with the buttons. On the development machine (12 threads) the light engines (i4, i6, V-twin, diesel) settle on
-ultra at ~30 % of one core, the V6/V8/V12 on high or balanced, the W24 on balanced.
-Single-core speed at 3500 rpm WOT (`soundlab steady --rpm 3500 --throttle 0.8 --quality ultra`, times real time):
+pinned with the buttons. Single-core speed at 3500 rpm WOT (`soundlab steady --rpm 3500 --throttle 0.8 --quality ultra`, times real time):
 
 | | ultra | high | balanced | fast | eco |
 |---|---|---|---|---|---|
@@ -249,11 +301,17 @@ Single-core speed at 3500 rpm WOT (`soundlab steady --rpm 3500 --throttle 0.8 --
 | v12 | 1.0 | 1.6 | 2.2 | 2.9 | 3.8 |
 | w24 | 0.6 | 0.9 | 1.3 | 1.7 | 2.6 |
 
-**Starting and stopping.** The starter (`sound/starter.rs`) is built from its parts instead of a tone: a click for
-every ring-gear tooth that passes the pinion (teeth x crank speed, with tooth-to-tooth scatter and a wandering rate so
-the harmonics blur to a rasp), ringing the starter nose and bell housing; commutator and brush hiss pulsed at the segment
-rate; a weak, wandering armature whine; the solenoid clack and pinion grind when it throws in and the clunk and
-free spin-down when it lets go. Its pitch is the crank's *instantaneous* speed: the sound model integrates the gas torque
+**Starting and stopping.** The starter (`sound/starter.rs`) is built from its parts instead of a tone. A key turn heard from
+outside is a rough, buzzing whirr that chugs, in the 100 Hz - 2 kHz octaves. (The first version was three thin tones that wobbled
+with the compression strokes, an "alien" whine; the second matched the flat octave bands of two recordings, 800 Hz to 6 kHz, with a
+wide noise floor, and read as gas rushing out: an airy hiss. `the_starter_is_a_low_mid_whirr_and_not_hiss` now pins the shape: the
+100 Hz - 1.6 kHz octaves within 5 dB of each other, 3.2-6.4 kHz at least 6 dB and everything above at least 14 dB down.) The whirr is
+the *armature*: the motor turns about thirteen times per crank turn and each turn is a pulse (commutator, brushes, poles) of its own
+strength, ringing housing modes at 310 Hz - 1.5 kHz; over it a click for every ring-gear tooth that passes the pinion (teeth x crank
+speed, with large tooth-to-tooth scatter in spacing and strength, through damped modes at 1-4.6 kHz), a light brush and fan hash
+(pink noise from 160 Hz to 2.4 kHz) and a barely audible whine. All of it is louder against a compression stroke and quieter between
+(`the_starter_chugs_with_the_compression_strokes`), plus the snap of the solenoid and the pinion grind when it throws in and the
+clunk and free spin-down when it lets go. Its pitch is the crank's *instantaneous* speed: the sound model integrates the gas torque
 of its own cylinders (compression resists, expansion pushes) against the engine model's starter torque curve and
 crank inertia, so the whirr sags and surges with every compression stroke (peak-to-peak 10 % on an i4, 3 % on a V8, as in
 the engine model; `cranking_sags_and_surges_like_the_engine_model` checks it). After light-off the first firings are
@@ -261,6 +319,33 @@ uneven for about a second. With the engine off (`activity` fades the radiation o
 is digital silence: the solver's round-off noise, which the loudness compressor would otherwise lift to -65 dBFS, no
 longer reaches the speakers. The intake and the exhaust also share one ambient pressure now (the engine model's
 atmosphere of 105 kPa at 33 C against the pipe model's 101 kPa had blown a 3 m/s draught through the stopped engine).
+
+A switched-off engine that is still *turning* (the key off in a car that rolls on in gear, a stall on a hill) is only a
+crank being dragged round: most engine noise is combustion, so the broadband engine noise falls to 10 % of its running
+level within a tenth of a second of the last firing (`Mechanical::fire`), and nothing else (gas path, jets, intake) runs. It used to hiss
+for as long as the wheels kept the crank turning, 25 dB under the running engine and lifted by the loudness compressor;
+now it is 40 dB under it and a coast of 12 s decays to inaudible (`an_engine_that_is_switched_off_but_still_turning_is_nearly_silent`).
+
+**Gas level.** The valve jets and the engine noise are 6 dB and 3 dB below the level the recordings gave (`JET_GAIN` 0.25,
+`ENGINE_NOISE_PA` 0.017): through the loudness compressor the engine as a whole is as loud as before, but the airy 1.5-10 kHz share
+of it (the part that reads as gas moving) is down 2.5-3.5 dB and the note stands out of it more.
+
+**Hiss at high rpm.** The valve-jet and engine-noise levels were calibrated on a car revving in neutral; held for half a
+minute at 5500 rpm in a high gear they sat at the loud edge of what the recordings allow and stood out of the note. Past 2500 rpm the
+jets' power falls by up to 6 dB (exhaust) and 3 dB (intake) toward 5500 rpm and the engine noise by 3 dB. At full
+throttle at 5000 rpm the 1.5-4 kHz band is now 3.5 dB lower and 4-10 kHz 4.5 dB lower than before, the tone unchanged.
+
+**Low end** (`sound/lowend.rs`). An engine of perfectly matched cylinders has only firing harmonics, and for a fast six or twelve
+(fundamental 250 Hz and more) that is one bright line and its overtones with nothing under it - the V6 at 5000 rpm had its
+30-200 Hz band 19-25 dB under its body. Real engines have the low orders of the crank (0.5, 1, 1.5, 2 ... times per
+revolution) from cylinder-to-cylinder differences, runner lengths, the shaking of the block on its mounts. The layer measures the
+band under 150 Hz and the band 260-1500 Hz of what the engine already makes and adds just what is missing to hold the first at
+-3 dB of the second at idle, -5 dB at 2000 rpm and -6.5 dB from 3000: orders phase-locked to the crank angle, each wandering in
+level and phase (a rough rumble, not a hum). A cross-plane V8, a four or a diesel, which have their low end, get nothing; a
+V12 at idle goes from -8 to 0 dB, the V6 at speed from -19..-25 to -10..-14 and the I6 from -14..-12 to -9..-7. Engines of 8 to 16
+cylinders get a floor up to 5 dB deeper (2 dB at idle, all of it from 2000 rpm): sixteen near-identical firings are the furthest from
+the matched idealisation, and a W16 had its 80-200 Hz band 6 dB under the W24's (whose unbalanced sides give it low orders for free) and
+its note a hollow buzz on a 250-300 Hz header resonance. Its low band now sits within about 2 dB of the W24's.
 
 The EXHAUST ACOUSTICS controls and the readouts under them show the live result: path length, the quarter-wave
 drone frequency of the pipe, the rpm the primaries tune to, gas temperature at the header and tip, the solver's
@@ -317,25 +402,28 @@ a real street car on straight pipes, and its top end, 40 dB above the stock car'
 are plane-wave (1-D), so above ~3 kHz, where the cross modes of a 65 mm pipe cut in, the top end is the valve-jet and
 engine-noise layers rather than the gas solver; combustion noise has no cylinder-pressure model behind it (the cylinder
 reservoirs have no heat release), only the engine-noise level law; the jet efficiency, the part losses and the engine
-noise are calibrated against four recordings, not measured; coarse quality tiers lose some level between 1 and 2.8 kHz.
+noise are calibrated against four recordings, not measured; the coarse quality tiers still lose level above 1.5 kHz (the per-tier correction is capped at +10 dB), where the valve-jet layer carries the sound; the low-end layer is a model of what real engines do, not of any one engine.
 
 **Sound lab** (`engine-core/examples/soundlab.rs`) renders without the viewer and reports what came out:
 
 ```
-soundlab steady     --engine v8 --rpm 3000 --throttle 0.8 [--tune "..."] [--quality ultra|high|balanced|fast|eco] [--shells] [--cells] [--bands] [--abs]
-soundlab start      --engine i4turbo [--hold 2.4] [--cold]            # key turn: starter, hold-off, light-off, settle (WAV + spectrograms)
+soundlab steady     --engine v8 --rpm 3000 --throttle 0.8 [--tune "..."] [--banks 0,1,0,1,...] [--quality ultra|high|balanced|fast|eco] [--shells] [--cells] [--bands] [--abs]
+soundlab start      --engine i4      [--hold 2.4] [--cold]            # key turn: starter, hold-off, light-off, settle (WAV + spectrograms)
 soundlab off        --engine v8 [--hot] [--trace]                      # what a stopped engine still says (must be nothing)
 soundlab sweep      --engine v8 --from 900 --to 6400 --secs 12      # WAV + spectrogram of a rev
 soundlab lift       --engine v12 --from 5500 --to 2200               # overrun burble
 soundlab thermal    --engine v8 --rpm 3500                           # gas and wall temperature along the pipe
 soundlab resonances --engine v8 --rpm 4000                           # transfer-matrix resonances, and the rpm where each meets a firing harmonic
 soundlab compare    --engine v8 --rpm 3000 --ref recording.wav       # 1/3-octave, centroid and line comparison with a real recording
+tierlab --engines v8,i4,i6 --rpms 1200,3000,6000 [--corrected]              # how each tier differs from the finest, band by band
 ```
 
 `steady --dump` also writes every source (`tail jet shell mech intake final`, plus the crank angle) as raw little-endian
 f32 for the Python tools. `cargo test --release -p viewer render_drive_scenarios -- --ignored --nocapture` renders
 scripted drives (start, idle, launch with auto-shift, lift-off, braking) through the live path, `render_model_swap` a
-tier hand-over; `tools/sound/scan.py` looks for clicks, discontinuities and stray tones in the result.
+tier hand-over, `render_problem_scenarios` the top gear at full throttle, the key switched off in neutral and in gear;
+`tools/sound/scan.py` looks for clicks, discontinuities and stray tones in the result, `ltas.py` gives the band balance by
+engine and rpm, `timeline.py` level and bands over time.
 
 `steady` prints the strongest spectral lines annotated with engine orders and firing multiples, 1/3-octave levels,
 dB(A), per-source levels (tailpipe, jet, shells, machinery, intake) and where the solver time goes. `compare` is how

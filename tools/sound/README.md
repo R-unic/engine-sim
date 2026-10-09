@@ -21,6 +21,11 @@ tools/sound/compare_refs.sh [tag] [quick]     decode the references, render the 
 | `flatness.py` | spectral flatness of 93 ms frames per band (how line-like the spectrum is): `file.wav:t0:t1 ...` |
 | `ripple.py` | formant ripple of the long-term spectrum of a rev: `file.wav:t0:t1 ...` |
 | `peaks.py` | strongest spectral lines of a steady segment and a comb estimate of the fundamental: `file.wav t0 t1 [f0_lo f0_hi]` |
+| `ltas.py` | band balance (30-80 / 80-200 / 200-500 / 0.5-1.5k / 1.5-4k / 4-10k Hz) by engine and rpm bin of the drive renders, and the low end re the body: `ltas.py DIR [engine ...]` |
+| `timeline.py` | level and four band levels over time next to the rpm trace: `timeline.py file.wav rpm.csv [step] [t0 t1]` |
+| `bandrel.py` | per-octave level of one window against another of the same file (a key turn against the idle after it), their difference and totals: `bandrel.py file.wav:t0:t1:t0:t1` |
+| `tonality.py` | how far the strongest spectral line stands out of its surroundings (dB), where it is, the share of 40-1500 Hz power in the three strongest lines and how many lines are within 15 dB, by engine and rpm bin: a drone is a line 25+ dB out carrying a third of the power: `tonality.py DIR [engine ...]` |
+| `fold.py`, `foldplot.py` | fold a steady `soundlab --dump` at the engine cycle (rms per slice / the averaged waveform as a PNG with the firing events marked): shows which firings are loud and which are weak, i.e. where the half orders come from |
 | `scan.py` | artifact scanner: clicks and pops, waveform discontinuities, persistent stray tones: `file.wav ...` |
 | `rawwav.py` | raw f32 (`soundlab --dump`) to a 16-bit WAV for the tools above |
 
