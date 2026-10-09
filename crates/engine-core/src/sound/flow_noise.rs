@@ -120,6 +120,16 @@ impl Shaper {
         Shaper { rng: seed | 1, hp: [0.0; 2], lp1: 0.0, lp2: 0.0, lp3: 0.0, a_hp: a(f_lo), a_lp1: a(f_knee), a_lp2: a(f_hi), a_lp3: a(f_hi * 1.4), gain: 1.0 }
     }
 
+    /// Takes over the generator and filter state of `other` (same seed and shape, possibly other cut-offs): both
+    /// then draw the same noise.
+    pub fn copy_state_from(&mut self, other: &Shaper) {
+        self.rng = other.rng;
+        self.hp = other.hp;
+        self.lp1 = other.lp1;
+        self.lp2 = other.lp2;
+        self.lp3 = other.lp3;
+    }
+
     /// Sets the gain that makes the output unit variance by measuring it on a burst of the generator itself.
     pub fn normalise(&mut self) {
         let mut probe = self.clone();
@@ -212,7 +222,7 @@ impl Envelope {
 
 /// Calibration of the jets' acoustic power against recordings (see the module notes): the literature efficiency
 /// is only good to a factor of a few.
-const JET_GAIN: f32 = 1.0;
+const JET_GAIN: f32 = 0.25;
 
 /// The exhaust and the intake flow-noise sources of one engine.
 #[derive(Clone, Debug)]
@@ -253,6 +263,12 @@ impl FlowLayer {
         }
     }
 
+    /// Takes over the noise generators of `other` (state included), keeping this layer's own shaping filters' gains.
+    pub fn copy_noise_from(&mut self, other: &FlowLayer) {
+        self.shp_x.copy_state_from(&other.shp_x);
+        self.shp_i.copy_state_from(&other.shp_i);
+    }
+
     /// The jets' acoustic power now (W), from [`crate::acoustics::GasPath::jet_powers`]; held until the next solver step.
     #[inline]
     pub fn set_jets(&mut self, exhaust: f32, intake: f32) {
@@ -263,9 +279,13 @@ impl FlowLayer {
     /// `throttle_open` (0..1) is how open the intake is to the sound travelling back up it from the valves: a choked
     /// throttle at idle is a wall to it, wide open it is not there (the manifold pressure ratio, squared, stands for it).
     #[inline]
-    pub fn step(&mut self, r: f32, ri: f32, throttle_open: f32) -> (f32, f32) {
-        let wx = self.env_x.step(self.w.0 * JET_GAIN, self.delay_x);
-        let wi = self.env_i.step(self.w.1 * JET_GAIN, self.delay_i);
+    pub fn step(&mut self, r: f32, ri: f32, throttle_open: f32, rpm: f32) -> (f32, f32) {
+        // The jets of a fast engine are the loud end of what the recordings (revving in neutral) showed, and a long
+        // steady pull in a high gear keeps them there: the hiss would stand out of the note it sits on. Past
+        // 2500 rpm the share they take falls by 6 dB (exhaust) and 3 dB (intake) toward 5500.
+        let hi = super::mechanical::smoothstep(2_500.0, 5_500.0, rpm);
+        let wx = self.env_x.step(self.w.0 * JET_GAIN * (1.0 - 0.75 * hi), self.delay_x);
+        let wi = self.env_i.step(self.w.1 * JET_GAIN * (1.0 - 0.5 * hi), self.delay_i);
         let open = throttle_open.clamp(0.0, 1.0);
         (self.shp_x.step(pressure_at(wx, r) * self.att_x), self.shp_i.step(pressure_at(wi, ri) * self.att_i * open * open))
     }
@@ -385,8 +405,8 @@ mod tests {
         let wot = render_v8(3500.0, 1.0, &Tuning::default());
         let (c_idle, c_wot) = (hf_crest(&idle), hf_crest(&wot));
         println!("3-9 kHz 1 ms crest: idle {c_idle:.2}, WOT {c_wot:.2} (noise ~1.3, solver spikes 10+)");
-        // the grid's spike train (crest 10-30 at the steepened fronts) is gone: what is up there is noise
-        assert!(c_idle < 3.0 && c_wot < 3.0, "the top end is spiky: crest {c_idle} / {c_wot}");
+        // the grid spike train (crest 10-30 at the steepened fronts) is gone: what is up there is noise (the per-tier correction lifts the 2-3 kHz edge of the band a little at idle)
+        assert!(c_idle < 3.5 && c_wot < 3.5, "the top end is spiky: crest {c_idle} / {c_wot}");
         let p_idle = spectrum(&idle, 8192);
         let p_wot = spectrum(&wot, 8192);
         let band = |p: &[f64], lo: f64, hi: f64| 10.0 * band_power(p, 44_100.0, lo, hi).log10();

@@ -172,7 +172,7 @@ fn rms_of(x: &[f32]) -> f32 {
 fn an_engine_that_is_off_is_silent() {
     // The loudness compressor lifts whatever is left of a quiet signal by up to 15 dB, and the pipe solver always
     // has a floor of round-off noise: with the engine off that floor was a faint airy hiss. It must stay digital zero.
-    for id in ["i4", "v8", "i4turbo", "w24"] {
+    for id in ["i4", "v8", "i4_16", "w24"] {
         let cfg = engine_by_id(id).unwrap();
         let mut snd = EngineSound::new(&cfg, &Tuning::default(), &default_banks(&cfg), Quality::FAST);
         let inp = resting_input(&cfg);
@@ -313,7 +313,7 @@ fn cranking_sags_and_surges_like_the_engine_model() {
 fn cranking_is_a_rich_buzz_with_energy_through_the_kilohertz_range() {
     use engine_core::acoustics::analysis::spectrum;
     // the old starter was a swept sine: nothing between its two lines
-    let cfg = engine_by_id("i4turbo").unwrap();
+    let cfg = engine_by_id("i4_16").unwrap();
     let (frames, _) = cranking_inputs(&cfg, 1.4);
     let mut snd = EngineSound::new(&cfg, &Tuning::default(), &default_banks(&cfg), Quality::FAST);
     let mut x = Vec::new();
@@ -358,6 +358,98 @@ fn the_quality_ladder_gets_finer_and_stays_stable_at_every_tier() {
         let g = &snd.gas.exhaust.net.grid;
         for k in 0..g.m {
             assert!(g.p[k].is_finite() && g.p[k] > 5.0e3 && g.p[k] < 3.0e6, "tier {:.0} mm: pressure {} Pa in cell {k}", q.dx * 1e3, g.p[k]);
+        }
+    }
+}
+
+fn rms_pa(x: &[f32]) -> f64 {
+    (x.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / x.len().max(1) as f64).sqrt()
+}
+
+/// Level (dB, arbitrary reference) of the 1/3-octave-wide band around `c` Hz of `x`.
+fn band_level(x: &[f32], lo: f64, hi: f64) -> f64 {
+    use engine_core::acoustics::analysis::{band_power, spectrum};
+    10.0 * band_power(&spectrum(x, 8192), 44_100.0, lo, hi).max(1e-30).log10()
+}
+
+#[test]
+fn an_engine_that_is_switched_off_but_still_turning_is_nearly_silent() {
+    // the key goes off in a car that rolls on in gear: the crank is still driven by the wheels at speed, nothing
+    // fires, and what is heard is the engine turning over - far under what it made running
+    for id in ["v8", "i4", "v12"] {
+        let cfg = engine_by_id(id).unwrap();
+        let mut inp = input(&cfg, &Tuning::default(), 3500.0, 0.6);
+        let mut snd = EngineSound::new(&cfg, &Tuning::default(), &default_banks(&cfg), Quality::FAST);
+        snd.preheat(inp.egt_k * 0.9);
+        snd.set_input(&inp);
+        snd.soak(1.0, 60.0);
+        let running: Vec<f32> = (0..22_050).map(|_| snd.next_sample()).collect();
+        inp.running = false;
+        inp.lit = false;
+        inp.serial += 1;
+        snd.set_input(&inp);
+        let _ = (0..44_100).map(|_| snd.next_sample()).count();
+        let off: Vec<f32> = (0..22_050).map(|_| snd.next_sample()).collect();
+        let drop_db = 20.0 * (rms_pa(&off) / rms_pa(&running)).log10();
+        println!("{id}: switched off at 3500 rpm, 1 s later {drop_db:.1} dB re running");
+        assert!(drop_db < -30.0, "{id}: the engine is only {drop_db:.1} dB down a second after the key went off");
+    }
+}
+
+#[test]
+fn the_tiers_of_the_solver_sound_alike() {
+    // the same engine at the same speed on the finest tier and on a coarse one: the radiation from the tailpipes has
+    // about the same level from the low end up to the body of the note (the coarse tier smooths the pulses and used
+    // to lose 3-4 dB of low end and 8 dB of the body; the per-tier correction puts them back)
+    for id in ["v8", "i6"] {
+        let cfg = engine_by_id(id).unwrap();
+        let inp = input(&cfg, &Tuning::default(), 3000.0, 0.8);
+        let render = |q: Quality| -> Vec<f32> {
+            let mut snd = EngineSound::new(&cfg, &Tuning::default(), &default_banks(&cfg), q);
+            snd.preheat(inp.egt_k * 0.9);
+            snd.set_input(&inp);
+            snd.soak(1.0, 60.0);
+            let mut sink = vec![0.0f32; 11_025];
+            snd.render(&mut sink);
+            (0..44_100).map(|_| {
+                snd.next_sample();
+                snd.p_tail
+            }).collect()
+        };
+        let fine = render(Quality::HIGH);
+        for q in [Quality::BALANCED, Quality::FAST, Quality::ECO] {
+            let coarse = render(q);
+            for (lo, hi, name) in [(60.0, 150.0, "low end"), (150.0, 400.0, "firing note"), (400.0, 900.0, "body")] {
+                let d = band_level(&coarse, lo, hi) - band_level(&fine, lo, hi);
+                println!("{id} {:.0} mm vs 28 mm, {name}: {d:+.1} dB", q.dx * 1e3);
+                assert!(d.abs() < 4.0, "{id} at {:.0} mm: the {name} is {d:+.1} dB off the finer tier", q.dx * 1e3);
+            }
+        }
+    }
+}
+
+#[test]
+fn engines_with_a_high_firing_frequency_still_have_a_low_end() {
+    // a fast six or twelve is one bright line and its overtones; the low orders of the crank bring the rumble back,
+    // and every engine at speed keeps its band under 150 Hz within about 12 dB of the one above 260 Hz
+    for id in ["v6", "i6", "v12"] {
+        let cfg = engine_by_id(id).unwrap();
+        for rpm in [2500.0, 4500.0] {
+            let inp = input(&cfg, &Tuning::default(), rpm, 0.8);
+            let mut snd = EngineSound::new(&cfg, &Tuning::default(), &default_banks(&cfg), Quality::FAST);
+            snd.preheat(inp.egt_k * 0.9);
+            snd.set_input(&inp);
+            snd.soak(1.5, 60.0);
+            let mut sink = vec![0.0f32; 22_050];
+            snd.render(&mut sink);
+            let x: Vec<f32> = (0..88_200).map(|_| {
+                snd.next_sample();
+                snd.p_tail + snd.p_jet + snd.p_shell + snd.p_mech + snd.p_intake + snd.p_low
+            }).collect();
+            let low = band_level(&x, 30.0, 150.0);
+            let body = band_level(&x, 260.0, 1500.0);
+            println!("{id} {rpm:.0} rpm: 30-150 Hz is {:+.1} dB re 260-1500 Hz", low - body);
+            assert!(low - body > -13.5, "{id} at {rpm:.0} rpm has no low end ({:+.1} dB)", low - body);
         }
     }
 }

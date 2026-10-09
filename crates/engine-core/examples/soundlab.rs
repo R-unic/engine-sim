@@ -119,8 +119,14 @@ fn main() {
     quality.tol = num(&m, "tol", quality.tol);
     quality.dx = num(&m, "dx", quality.dx);
     quality.div = num(&m, "div", quality.div as f32) as u32;
-    let banks = default_banks(&cfg);
+    let mut banks = default_banks(&cfg);
+    if let Some(b) = m.get("banks") {
+        // --banks 0,0,1,1: bank of every cylinder (the viewer's own layout is the default)
+        banks = b.split(',').map(|v| v.parse().expect("bad --banks")).collect();
+    }
+    let t_build = std::time::Instant::now();
     let mut snd = EngineSound::new(&cfg, &tuning, &banks, quality);
+    println!("built in {:.0} ms", t_build.elapsed().as_secs_f64() * 1e3);
     let r = snd.gas.exhaust.report.clone();
     println!(
         "{} - {} cells, {} nodes, {} tail(s); primary {:.2} m x {:.0} mm ({}), main pipe {:.0} mm ({}), path {:.2} m",
@@ -263,6 +269,7 @@ fn main() {
                     println!("  shell {name:<12} ducts {} surface {:.2} m2 dia {:.0} mm wall {:.1} mm {:?}: {:.1} dB, modes {:?}", bd.ducts.len(), bd.surface, bd.diameter * 1e3, bd.wall.thickness_m * 1e3, bd.wall.material, spl((body_sq[b] / n as f64).sqrt()), modes.iter().map(|f| f.round() as i32).collect::<Vec<_>>());
                 }
             }
+            println!("p_evo of every cylinder (bar): {}", snd.gas.p_evo.iter().map(|p| format!("{:.2}", p / 1e5)).collect::<Vec<_>>().join(" "));
             println!("cylinders at their last exhaust-valve opening: {:.2} bar (cyl 1), {:.0} K", snd.gas.p_evo[0] / 1e5, snd.gas.t_evo[0]);
             let rms_pa = (tail.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / n as f64).sqrt();
             println!("tailpipe sound at {:.1} m: {:.1} dB SPL = {:.1} dB(A) (rms {:.2} Pa); all sources {:.1} dB(A)", snd.listener_r, spl(rms_pa), a_weighted_spl(&tail, fs), rms_pa, a_weighted_spl(&full_pa, fs));
@@ -382,6 +389,8 @@ fn main() {
             let mut burn = vec![0.0f32; n_cyl];
             let mut out: Vec<f32> = Vec::new();
             let mut tail: Vec<f32> = Vec::new();
+            // the sources behind the mix: tailpipe, valve-jet noise, pipe shells, machinery (starter, rattle, ...), intake, low-end layer
+            let mut layers: [Vec<f32>; 6] = Default::default();
             let mut rpm_log: Vec<(f32, f32)> = Vec::new();
             let frame = 1.0 / 60.0f64;
             let per_frame = (fs / 60.0) as usize;
@@ -454,6 +463,9 @@ fn main() {
                 for _ in 0..per_frame {
                     out.push(snd.next_sample());
                     tail.push(snd.p_tail + snd.p_jet + snd.p_shell + snd.p_mech + snd.p_intake);
+                    for (l, v) in layers.iter_mut().zip([snd.p_tail, snd.p_jet, snd.p_shell, snd.p_mech, snd.p_intake - 0.0, snd.p_low]) {
+                        l.push(v);
+                    }
                     if (0.9..1.4).contains(&t) {
                         let d = snd.crank_speed_deviation();
                         snd_min = snd_min.min(d);
@@ -471,6 +483,11 @@ fn main() {
                 if i1 > i0 + 4096 {
                     println!("  {name:<20} out rms {:.4} | {}", rms(&out[i0..i1]), band_levels(&out[i0..i1], fs));
                     println!("  {:<20} pa      | {}", "", band_levels(&tail[i0..i1], fs));
+                    if m.contains_key("layers") {
+                        for (nm, l) in ["tail", "jet", "shell", "mech", "intake", "low"].iter().zip(layers.iter()) {
+                            println!("  {:<20} {nm:<7}| {}", "", band_levels(&l[i0..i1], fs));
+                        }
+                    }
                 }
             }
             let base = format!("{out_dir}/start_{id}");

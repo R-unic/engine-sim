@@ -8,9 +8,11 @@
 //! solver, so changing a part changes the sound for the physical reason.
 
 pub mod flow_noise;
+pub mod lowend;
 pub mod mechanical;
 pub mod radiation;
 pub mod starter;
+pub mod tier_eq;
 
 use crate::acoustics::{Env, GasPath, MouthSample, PipeMaterial};
 use crate::config::{EngineConfig, IgnitionType};
@@ -28,6 +30,9 @@ const MODEL_P_AMB: f32 = 101_325.0;
 /// compression torque on the crank is larger than the engine model's; this brings the speed ripple while
 /// cranking to what the engine model has (checked against it by the `cranking_speed_ripple` test).
 const CRANKING_TORQUE_SCALE: f32 = 0.35;
+/// Extra output gain at light-off (the engine catching and flaring above idle) and how long it takes to relax, s.
+const ROAR_GAIN: f32 = 1.3;
+const ROAR_TAU_S: f32 = 1.6;
 
 /// Upper edge of what the pipe solver radiates, Hz. Its cells are centimetres long, so nothing above a few kHz
 /// is resolved wave motion; what lies above that is the grid's own spikes at the steepened fronts of the pulses,
@@ -110,10 +115,22 @@ pub struct SoundInput {
     pub backfire: f32,
 }
 
-/// Default bank assignment when the caller has no layout: cylinders alternate between banks.
+/// Crank angle after the firing top dead centre at which the pressure rise of a combustion hits the block, and the
+/// half-width of the triangular scatter of that moment (about 1.5 degrees rms).
+const COMB_ANGLE_DEG: f32 = 366.0;
+const COMB_JITTER_DEG: f32 = 3.7;
+
+/// Default bank assignment when the caller has no layout: the same one the viewer's 3-D layout uses. V engines
+/// alternate between their two banks, a W16 is two VR8s side by side (four banks of four, cylinders 1-4 on the
+/// first) and a W24 three banks of eight with the labels counted from the other side.
 pub fn default_banks(cfg: &EngineConfig) -> Vec<u8> {
     let nb = crate::config::bank_tilts_deg(&cfg.id).len().max(1);
-    (0..cfg.cylinder_count).map(|l| (l % nb) as u8).collect()
+    let n = cfg.cylinder_count;
+    match crate::config::layout_of(&cfg.id) {
+        "w16" => (0..n).map(|l| (l * 4 / n) as u8).collect(),
+        "w24" => (0..n).map(|l| (2 - l * 3 / n) as u8).collect(),
+        _ => (0..n).map(|l| (l % nb) as u8).collect(),
+    }
 }
 
 #[inline(always)]
@@ -149,6 +166,9 @@ pub struct EngineSound {
     boost: f32,
     master: f32,
     prev_local: Vec<f32>,
+    /// Crank angle (degrees, 0..720 of the cylinder) at which each cylinder's next combustion thud reaches the block:
+    /// redrawn every cycle, because combustions are never timed to the degree.
+    comb_angle: Vec<f32>,
     // solver sub-rate: outputs of the last two solver steps, interpolated per audio sample
     div: u32,
     /// Length of the latest solver step, s, and the audio time since the start of that step.
@@ -168,6 +188,9 @@ pub struct EngineSound {
     body_cur: Vec<f32>,
     /// Tailpipe pressure at the listener for the current sample, Pa (analysis).
     pub p_tail: f32,
+    /// Whether the radiation of a coarse tier is brought back to the body of the finest one (`tier_eq`); off only to
+    /// measure the tiers as they are.
+    pub tier_correction: bool,
     /// Pressure from the jets, the pipe shells and the machinery this sample (analysis).
     pub p_jet: f32,
     pub p_shell: f32,
@@ -201,11 +224,22 @@ pub struct EngineSound {
     // the pipe solver resolves no more than a few kHz; the monopole radiation is band-limited to match
     tail_lp: Lowpass4,
     intake_lp: Lowpass4,
+    // puts back what a coarse solver tier smooths away (`tier_eq`)
+    tail_eq: tier_eq::TierEq,
+    intake_eq: tier_eq::TierEq,
     // valve-jet noise above that band
     flow: flow_noise::FlowLayer,
     // the first firings after light-off are uneven
     catch: f32,
+    /// The roar of the engine lighting and flaring: 1 at light-off, relaxing over a couple of seconds
+    roar: f32,
+    /// `roar` as the output gain sees it (eased in over about a tenth of a second, so the light-off is a swell, not a step)
+    roar_gain: f32,
     was_unlit: bool,
+    // the low orders of the crank, where the pipe model leaves them out
+    lowend: lowend::LowEnd,
+    /// What the low-end layer added this sample (analysis).
+    pub p_low: f32,
     // loudness compressor
     env_rms: f32,
     // master chain
@@ -256,6 +290,7 @@ impl EngineSound {
             boost: 0.0,
             master: 0.0,
             prev_local: vec![0.0; n],
+            comb_angle: vec![COMB_ANGLE_DEG; n],
             div: quality.div.max(1),
             step_len: 0.0,
             step_clock: 0.0,
@@ -270,6 +305,7 @@ impl EngineSound {
             body_prev: vec![101_325.0; gas.body_p.len()],
             body_cur: vec![101_325.0; gas.body_p.len()],
             p_tail: 0.0,
+            tier_correction: true,
             p_jet: 0.0,
             p_shell: 0.0,
             p_mech: 0.0,
@@ -292,9 +328,15 @@ impl EngineSound {
             activity: 0.0,
             tail_lp: Lowpass4::new(RADIATION_BAND_HZ, fs),
             intake_lp: Lowpass4::new(RADIATION_BAND_HZ, fs),
+            tail_eq: tier_eq::TierEq::new(quality.dx, fs),
+            intake_eq: tier_eq::TierEq::new(quality.dx, fs),
             flow: flow_noise::FlowLayer::new(fs, tuning, gas.exhaust.report.path_length, 470.0, !gas.exhaust.turbines.is_empty()),
             catch: 0.0,
+            roar: 0.0,
+            roar_gain: 0.0,
             was_unlit: false,
+            lowend: lowend::LowEnd::for_cylinders(fs, n),
+            p_low: 0.0,
             env_rms: 0.05,
             dc_in: 0.0,
             dc_out: 0.0,
@@ -327,12 +369,22 @@ impl EngineSound {
         self.dc_in = other.dc_in;
         self.dc_out = other.dc_out;
         self.catch = other.catch;
+        self.roar = other.roar;
+        self.roar_gain = other.roar_gain;
         self.was_unlit = other.was_unlit;
         self.tau_gas = other.tau_gas;
         self.tau_mean = other.tau_mean;
         self.crank_dw = other.crank_dw;
         self.strain = other.strain;
+        self.lowend = other.lowend.clone();
         self.gas.crank = other.gas.crank;
+        self.gas.copy_state_from(&other.gas);
+        // the same noise, sample for sample: the two models' hiss and rasp then cross-fade as one signal instead of
+        // dipping 3 dB at the middle of the fade as two uncorrelated ones do
+        self.mech.copy_noise_from(&other.mech);
+        self.flow.copy_noise_from(&other.flow);
+        self.jets.clone_from(&other.jets);
+        self.ijets.clone_from(&other.ijets);
         self.input = other.input.clone();
     }
 
@@ -384,12 +436,13 @@ impl EngineSound {
         // now and then burns a fraction of its charge, and the idle settles over about a second
         if self.was_unlit && inp.lit && inp.running {
             self.catch = 1.0;
+            self.roar = 1.0;
         }
         self.was_unlit = inp.cranking && !inp.lit;
         for i in 0..self.cfg.cylinder_count {
             let mut burn = inp.burn.get(i).copied().unwrap_or(1.0).clamp(0.0, 1.0);
-            if self.catch > 0.02 && self.rand() < 0.6 * self.catch {
-                burn *= 0.1 + 0.55 * self.rand();
+            if self.catch > 0.02 && self.rand() < 0.3 * self.catch {
+                burn *= 0.35 + 0.5 * self.rand();
             }
             self.gas.t_evo[i] = self.evo_temperature_for(burn, inp);
             self.gas.fuel_frac[i] = burn / inp.afr.max(5.0);
@@ -532,6 +585,8 @@ impl EngineSound {
         let driven = running || in_cranking;
         let rpm_eff = if driven { crank_rpm } else { 0.0 };
         self.catch *= (-dt / 0.9).exp();
+        self.roar *= (-dt / ROAR_TAU_S).exp();
+        self.roar_gain += (self.roar - self.roar_gain) * (1.0 - (-dt / 0.12).exp());
         // radiation follows the engine turning: a stopped engine is silent, however the solver's round-off
         // noise would otherwise sound once the compressor below lifts it
         let k_act = 1.0 - (-dt / if rpm_eff > 25.0 || in_cranking { 0.03 } else { 0.2 }).exp();
@@ -570,12 +625,24 @@ impl EngineSound {
             // engine events for the mechanical layer (firing, valve motion)
             if rpm_eff > 15.0 {
                 let vt = self.gas.valves;
+                let diesel = self.cfg.ignition_type == IgnitionType::Compression;
                 for i in 0..n {
                     let local = self.gas.local(i);
                     let prev = self.prev_local[i];
                     let crossed = |a: f32| if prev <= local { prev < a && local >= a } else { prev < a || local >= a };
-                    if combusting && crossed(366.0) {
-                        combustion += self.input.burn.get(i).copied().unwrap_or(1.0);
+                    if combusting && crossed(self.comb_angle[i]) {
+                        // no two combustions are alike: how hard the block is hit and when (cylinder to cylinder
+                        // and cycle to cycle) scatter, so the thuds are a rough rattle and not a pulse train whose
+                        // every harmonic stands as a clean tone
+                        // (a diesel's clatter is the sharper, and varies the more: the ignition delay of every injection differs,
+                        // and a clatter that ticks over at exactly the firing rate is a buzz at the block's mode)
+                        let (hard, shift) = if diesel {
+                            (0.5 + 1.0 * self.rand(), 1.6 * COMB_JITTER_DEG * (self.rand() + self.rand() - 1.0))
+                        } else {
+                            (0.6 + 0.8 * self.rand(), COMB_JITTER_DEG * (self.rand() + self.rand() - 1.0))
+                        };
+                        combustion += self.input.burn.get(i).copied().unwrap_or(1.0) * hard;
+                        self.comb_angle[i] = COMB_ANGLE_DEG + shift;
                     }
                     for a in [vt.exhaust.open, vt.exhaust.close(), vt.intake.open, vt.intake.close()] {
                         if crossed(a) {
@@ -602,8 +669,9 @@ impl EngineSound {
             p_tail += monopole_pressure(self.flow_hist[k].dq_dt(frac), r);
             p_jet += self.jets[k].step(a.u + (c.u - a.u) * frac, r, self.fs);
         }
-        p_tail = self.tail_lp.step(p_tail) * act;
-        let (flow_x, flow_i) = self.flow.step(r, self.listener_r * 1.2, self.gas.map_target / (0.97 * MODEL_P_AMB));
+        let p_tail_eq = self.tail_eq.step(p_tail);
+        p_tail = self.tail_lp.step(if self.tier_correction { p_tail_eq } else { p_tail }) * act;
+        let (flow_x, flow_i) = self.flow.step(r, self.listener_r * 1.2, self.gas.map_target / (0.97 * MODEL_P_AMB), self.rpm);
         p_jet = (p_jet + flow_x) * act;
         // induction noise from the intake mouths; a turbo's compressor and charge piping muffle it
         let turbo_mute = 1.0 - 0.85 * in_spool.clamp(0.0, 1.0);
@@ -614,7 +682,8 @@ impl EngineSound {
             p_in += monopole_pressure(self.iflow_hist[k].dq_dt(frac), ri);
             p_in_jet += self.ijets[k].step(a.u + (c.u - a.u) * frac, ri, self.fs);
         }
-        p_in = (self.intake_lp.step(p_in) + p_in_jet + flow_i) * turbo_mute * act;
+        let p_in_eq = self.intake_eq.step(p_in);
+        p_in = (self.intake_lp.step(if self.tier_correction { p_in_eq } else { p_in }) + p_in_jet + flow_i) * turbo_mute * act;
         self.p_intake = p_in;
         p += p_in;
         p += p_tail + p_jet;
@@ -650,6 +719,9 @@ impl EngineSound {
         });
         p += p_mech;
         self.p_mech = p_mech;
+        // what an engine of perfectly matched cylinders has no orders for
+        self.p_low = self.lowend.step(p, self.gas.crank, self.rpm, act);
+        p += self.p_low;
 
         let t4 = tsc();
         self.prof[0] += t1 - t0;
@@ -660,7 +732,8 @@ impl EngineSound {
         // the real dynamic range is given up), then DC block and soft limiter
         self.env_rms += (p * p - self.env_rms) * (1.0 - (-dt / 0.35).exp());
         let comp = (self.env_rms.max(1.0e-4).sqrt() / 1.0).powf(-0.30).clamp(0.4, 6.0);
-        let x = p * comp / self.full_scale_pa;
+        // the light-off roar is not leveled away: the compressor needs a third of a second to follow it
+        let x = p * comp * (1.0 + ROAR_GAIN * self.roar_gain) / self.full_scale_pa;
         let hp = x - self.dc_in + 0.9985 * self.dc_out;
         self.dc_in = x;
         self.dc_out = hp;

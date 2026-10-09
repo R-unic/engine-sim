@@ -6,7 +6,33 @@ use super::starter::{Starter, StarterCtx};
 
 /// Pressure (rms, Pa, at the listener) of the broadband engine noise at 1000 rpm and full load: calibrated against
 /// recordings of idling and revving cars (`README`, Audio).
-const ENGINE_NOISE_PA: f32 = 0.024;
+const ENGINE_NOISE_PA: f32 = 0.017;
+
+/// Structural modes of the block that a combustion thud rings: (Hz, damping ratio, weight). A block has hundreds of
+/// them, closely spaced and well damped, so what reaches the ear is a smooth, dull thud; three sharp modes (the first
+/// version) made a nasal tone at 640 Hz that sat in every engine at every speed.
+const BLOCK_MODES: [(f32, f32, f32); 6] = [(520.0, 0.09, 0.9), (740.0, 0.09, 1.0), (1050.0, 0.10, 0.8), (1500.0, 0.11, 0.6), (2100.0, 0.12, 0.45), (2900.0, 0.13, 0.3)];
+
+/// Scale of the pressure-rise input of the block modes (calibrated so the rattle keeps the level it had at idle).
+const BLOCK_RISE_GAIN: f32 = 7.5;
+
+/// A diesel's pressure rise is quicker than a petrol engine's (corner of the smoothing of its pulse, Hz) and its clatter
+/// is louder against the block modes (gain of the clatter bank, with the 7x impulse of `step`), and it leaves the modes
+/// above 1.8 kHz mostly unexcited (their weight).
+const DIESEL_RISE_HZ: f32 = 1_000.0;
+const DIESEL_UPPER_MODES: f32 = 0.2;
+const DIESEL_CLATTER_LP_HZ: f32 = 1_600.0;
+const DIESEL_CLATTER: f32 = 0.026;
+
+/// Share of the engine noise that is left when nothing burns (valve train, bearings, gears, belts only).
+const MOTORING: f32 = 0.10;
+
+/// 0 below `a`, 1 above `b`, smooth between.
+#[inline]
+pub fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
 
 #[derive(Clone, Debug)]
 pub struct Noise(u32);
@@ -101,13 +127,16 @@ pub struct MechCtx {
 pub struct Mechanical {
     fs: f32,
     rng: Noise,
-    block: [Res; 3],
+    block: [Res; BLOCK_MODES.len()],
+    /// Two poles that take the edge off the diesel's clatter.
+    diesel_lp: [f32; 2],
     head: Res,
     ping: Res,
     starter: Starter,
     /// The combustion pressure rise is not a spike: it reaches the block as a pulse about a third of a
     /// millisecond long, which is what keeps the rattle a thud rather than a click.
     comb_lp: f32,
+    comb_prev: f32,
     valve_lp: f32,
     // turbo
     spool_s: f32,
@@ -127,6 +156,8 @@ pub struct Mechanical {
     tick_gain: f32,
     /// Broadband engine noise (combustion, bearings, gears, drive, injectors): stationary, as recordings of real engines show.
     engine_noise: Shaper,
+    /// 1 while the engine fires, falling away when it stops.
+    fire: f32,
     // the tonal parts are not perfectly steady: drift and flutter of the whistle and the gear mesh
     whistle_fm: Wander,
     whistle_am: Wander,
@@ -140,11 +171,13 @@ impl Mechanical {
         Mechanical {
             fs,
             rng: Noise::new(0x51ED_270B),
-            block: [Res::new(640.0, 0.03, fs), Res::new(1350.0, 0.04, fs), Res::new(2600.0, 0.05, fs)],
+            block: BLOCK_MODES.map(|(f, z, _)| Res::new(f, z, fs)),
+            diesel_lp: [0.0; 2],
             head: Res::new(2400.0, 0.06, fs),
             ping: Res::new(5800.0, 0.02, fs),
             starter: Starter::new(fs, displacement_l),
             comb_lp: 0.0,
+            comb_prev: 0.0,
             valve_lp: 0.0,
             spool_s: 0.0,
             turbo_phase: 0.0,
@@ -161,6 +194,7 @@ impl Mechanical {
             knock_env: 0.0,
             tick_env: 0.0,
             tick_gain: 1.0,
+            fire: 0.0,
             engine_noise: {
                 let mut s = Shaper::new(0x2F6B_91A7, fs, 450.0, 1_800.0, 6_500.0);
                 s.normalise();
@@ -174,6 +208,14 @@ impl Mechanical {
         }
     }
 
+    /// Takes over the noise generators of `other` (state included), so both produce the same noise from here on.
+    pub fn copy_noise_from(&mut self, other: &Mechanical) {
+        self.engine_noise = other.engine_noise.clone();
+        self.rng = other.rng.clone();
+        self.rng2 = other.rng2.clone();
+        self.fire = other.fire;
+    }
+
     /// One sample of mechanical sound, in pascals at the listener.
     pub fn step(&mut self, c: &MechCtx) -> f32 {
         let dt = 1.0 / self.fs;
@@ -183,18 +225,32 @@ impl Mechanical {
         // ---- combustion pressure rise rattles the block (diesel clatter is the same, much sharper)
         let strength = c.combustion * if c.diesel { 7.0 } else { 1.0 };
         let imp = strength * (0.6 + 0.8 * c.load.clamp(0.0, 1.2));
-        // the pulse is smoothed (a diesel's much less: its pressure rise is nearly instant)
-        let k_comb = if c.diesel { 0.5 } else { 1.0 - (-tau * 700.0 * dt).exp() };
+        // the pulse is smoothed (a diesel's much less: its pressure rise is nearly instant, but not instant: the
+        // first version fed three sharp modes with a step and made a regular 640 Hz buzz at the firing rate)
+        let k_comb = 1.0 - (-tau * if c.diesel { DIESEL_RISE_HZ } else { 700.0 } * dt).exp();
         self.comb_lp += (imp - self.comb_lp) * k_comb;
         let mut s = 0.0;
-        let k = [1.0, 0.7, 0.45];
-        for (i, r) in self.block.iter_mut().enumerate() {
-            s += r.step(self.comb_lp * k[i]) * (1.0 - 0.15 * i as f32);
+        // the block answers the rate of rise of the pressure, not its level: no rumble below the first modes
+        let rise = (self.comb_lp - self.comb_prev) * BLOCK_RISE_GAIN;
+        self.comb_prev = self.comb_lp;
+        for (r, m) in self.block.iter_mut().zip(BLOCK_MODES.iter()) {
+            // (the clatter's body is the low modes: its upper ones, which a petrol engine's thud only touches, are
+            // what made it a tick train hissing out to 5 kHz)
+            let w = if c.diesel && m.0 > 1_800.0 { DIESEL_UPPER_MODES } else { 1.0 };
+            s += r.step(rise * m.2 * w);
+        }
+        if c.diesel {
+            // a two-pole resonator passes its input straight through above its own frequency, so the sharp rise
+            // would click through unchanged; the clatter is the modes' ring, not that edge
+            for lp in self.diesel_lp.iter_mut() {
+                *lp += (s - *lp) * (1.0 - (-tau * DIESEL_CLATTER_LP_HZ * dt).exp());
+                s = *lp;
+            }
         }
         // a petrol engine's combustion thud stands out at idle, where nothing masks it, and is lost in the
         // exhaust and the wind of a hard drive: it is a little quieter at low revs
         let revs = 0.55 + 0.45 * (c.rpm / 3000.0).clamp(0.0, 1.0);
-        let mut out = s * if c.diesel { 0.020 } else { 0.030 * revs };
+        let mut out = s * if c.diesel { DIESEL_CLATTER } else { 0.030 * revs };
 
         // ---- valve train: a soft tick per valve event through the head's resonance, every one a little
         // different (lash, the lifter, which valve), and rolled off - the ear picks out sparse sharp ticks
@@ -211,8 +267,16 @@ impl Mechanical {
         // ---- engine noise: combustion, bearings, gears, chain and belts, injectors and the rest add up to a broadband
         // noise (recordings: stationary, envelope rms/mean ~0.55, with only a few percent of modulation at the firing
         // rate) whose level climbs with engine speed (about rpm^1.1 in amplitude) and a little with load
+        // Most of it is combustion: an engine that is only being turned (the key off in a car that rolls on, a
+        // stalled engine on a hill, the starter before the fire) is some 20 dB quieter. The change follows the fire
+        // with a short lag, so the hiss of a switched-off engine does not hang on while its crank runs down.
         let speed = (c.rpm / 1000.0).max(0.0);
-        let load = if c.combusting { 0.7 + 0.3 * c.load.clamp(0.0, 1.2) } else { 0.45 };
+        let k_fire = 1.0 - (-dt / if c.combusting { 0.02 } else { 0.10 }).exp();
+        self.fire += (c.combusting as u8 as f32 - self.fire) * k_fire;
+        // the noise of a very fast engine grows more slowly than rpm^1.1: a long steady pull in a high gear must
+        // not hiss
+        let hi_rpm = smoothstep(2_500.0, 5_500.0, c.rpm);
+        let load = (0.7 + 0.3 * c.load.clamp(0.0, 1.2)) * (MOTORING + (1.0 - MOTORING) * self.fire) * (1.0 - 0.3 * hi_rpm);
         out += self.engine_noise.step(ENGINE_NOISE_PA * speed.powf(1.1) * load * if c.diesel { 1.6 } else { 1.0 });
 
         // ---- knock (detonation ping)
